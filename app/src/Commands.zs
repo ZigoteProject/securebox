@@ -65,25 +65,51 @@ let private settle (ctx: Ctx) (name: string) : result<unit, string> =
         Ok ()
     | _ -> Error $"the box '{name}' did not stay up: its image needs a 'sleep' that takes 'infinity'. Remove it with: securebox rm {name}"
 
-/// Makes sure a `--dbus` box's filter is running: started through the user's systemd,
-/// which keeps it when securebox is gone. `names` is asked for only when it must be started.
-let private filtered (ctx: Ctx) (name: string) (names: unit -> result<list<string>, string>) : result<unit, string> =
-  if ctx.runtime = "" || ctx.busAddress = "" || String.startsWith "-" ctx.busAddress then
-    Error "--dbus needs your session bus, and there is none here (XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS is not set)"
-  else if Host.tool ("systemctl", proxyActiveArgs name) = 0 then Ok ()
+/// Makes sure a unit of the box's is running: started through the user's systemd, which
+/// keeps it when securebox is gone. `prepare` is run only when it must be started, and
+/// gives the arguments of `systemd-run`.
+let private served (ctx: Ctx) (unit: string) (socket: string) (needs: string) (prepare: unit -> result<list<string>, string>) : result<unit, string> =
+  if ctx.runtime = "" then Error $"{needs}, and there is no session here (XDG_RUNTIME_DIR is not set or cannot be used)"
+  else if Host.tool ("systemctl", unitActiveArgs unit) = 0 then Ok ()
   else
-    match names () with
+    match prepare () with
     | Error e -> Error e
-    | Ok granted ->
-      let socket = hostBusDir ctx name + "/bus"
-      match Host.ensureDir (hostBusDir ctx name) with
-      | Error e -> Error e
-      | Ok () ->
-        Host.remove socket       // one a filter that was killed left
-        if Host.tool ("systemd-run", proxyStartArgs ctx name granted) <> 0 then
-          Error "the D-Bus filter could not be started: --dbus needs xdg-dbus-proxy and a systemd user session (systemd-run --user)"
-        else if Host.awaitPath socket then Ok ()
-        else Error "the D-Bus filter was started but is not listening"
+    | Ok args ->
+      Host.removeTree socket       // one that a unit that was killed left
+      if Host.tool ("systemd-run", args) <> 0 then Error $"{needs}, through a systemd user session (systemd-run --user), and it could not be started"
+      else if Host.awaitPath socket then Ok ()
+      else Error $"{needs}, which was started but is not listening"
+
+/// A `--dbus` box's filter. `names` is asked for only when it must be started.
+let private filtered (ctx: Ctx) (name: string) (names: unit -> result<list<string>, string>) : result<unit, string> =
+  served ctx (busUnit name) (hostBusDir ctx name + "/bus") "--dbus needs xdg-dbus-proxy" (fun () ->
+    if ctx.busAddress = "" || String.startsWith "-" ctx.busAddress then
+      Error "--dbus needs your session bus, and there is none here (DBUS_SESSION_BUS_ADDRESS is not set)"
+    else
+      match (names (), Host.ensureDir (hostBusDir ctx name)) with
+      | (Error e, _) -> Error e
+      | (_, Error e) -> Error e
+      | (Ok granted, Ok ()) -> Ok (proxyStartArgs ctx name granted))
+
+/// A `--sound` box's front-end: the session's own pipewire-pulse configuration, with an
+/// override that moves its socket into the box's directory and turns module loading off.
+let private fronted (ctx: Ctx) (name: string) : result<unit, string> =
+  served ctx (soundUnit name) (hostSoundDir ctx name + "/native") "--sound needs pipewire-pulse" (fun () ->
+    let conf = hostSoundConf ctx name
+    if not (Host.pathExists (ctx.runtime + "/pipewire-0")) then
+      Error $"--sound needs PipeWire, and there is no socket of it at {ctx.runtime}/pipewire-0"
+    else
+      match List.tryFind (fun f -> Host.pathExists f) soundConfigFiles with
+      | None -> Error "--sound needs pipewire-pulse, whose configuration (pipewire-pulse.conf) was not found"
+      | Some stock ->
+        let written =
+          [ Host.ensureDir (hostSoundDir ctx name)
+            Host.ensureDir (conf + "/pipewire-pulse.conf.d")
+            Host.copyFile (stock, conf + "/pipewire-pulse.conf")
+            Host.writeFile (conf + "/pipewire-pulse.conf.d/securebox.conf", soundOverride ctx name) ]
+        match List.tryFind Result.isError written with
+        | Some (Error e) -> Error $"--sound: {e}"
+        | _ -> Ok (soundStartArgs ctx name))
 
 /// The names a `--dbus` box was created with, read back from its label and checked again.
 let private busNames (name: string) () : result<list<string>, string> =
@@ -95,18 +121,16 @@ let private busNames (name: string) () : result<list<string>, string> =
     else Error $"the box '{name}' has no usable list of D-Bus names; create it again with --dbus"
 
 let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
-  let needs =
-    List.concat [
-      Option.toList (Option.map (fun s -> ("--wayland: there is no compositor socket at ", s)) spec.wayland)
-      Option.toList (Option.map (fun d -> ("--sound: there is no sound server socket at ", d + "/native")) spec.sound) ]
-  let lacking = List.filter (fun (_, path) -> not (Host.pathExists path)) needs
+  let lacking = List.filter (fun socket -> not (Host.pathExists socket)) (Option.toList spec.wayland)
   match lacking with
-  | (what, path) :: _ -> Error (what + path)
+  | socket :: _ -> Error $"--wayland: there is no compositor socket at {socket}"
   | [] ->
     let home = boxHome ctx spec.name
     let kept = Host.dirExists home
     let _ = (Host.ensureDir home)?
+    // the filter and the front-end first: their directories are what the box mounts
     let _ = (if spec.dbus = [] then Ok () else filtered ctx spec.name (fun () -> Ok spec.dbus))?
+    let _ = (if spec.sound then fronted ctx spec.name else Ok ())?
     let _ = (podman (createArgs ctx spec) $"podman could not create the box '{spec.name}'")?
     let _ = (podman (startArgs spec.name) $"the box '{spec.name}' was created but did not start")?
     let _ = (settle ctx spec.name)?
@@ -117,8 +141,10 @@ let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
 
 let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<int, string> =
   let state = (find ctx name)?
-  // what the session must have for the box's grants: the filter always, the rest to start it
+  // what the session must have for the box's grants: the filter and the front-end always,
+  // the compositor's socket to start it
   let _ = (if hasBus ctx state then filtered ctx name (busNames name) else Ok ())?
+  let _ = (if hasSound ctx state then fronted ctx name else Ok ())?
   let lacking = if state.running then [] else List.filter (fun (_, path) -> not (Host.pathExists path)) (sessionNeeds ctx state)
   let started =
     match lacking with
@@ -129,18 +155,17 @@ let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<in
 
 let list () : result<int, string> = Ok (Host.exec listArgs)
 
-/// A stopped box needs no D-Bus filter, and a removed one no place for it either.
-let private unfiltered (ctx: Ctx) (name: string) (state: BoxState) (removed: bool) =
-  if hasBus ctx state then
-    Host.tool ("systemctl", proxyStopArgs name) |> ignore
-    if removed && ctx.runtime <> "" then
-      Host.remove (hostBusDir ctx name + "/bus")
-      Host.remove (hostBusDir ctx name)
+/// A stopped box needs no filter and no front-end, and a removed one no place for them.
+let private unserved (ctx: Ctx) (name: string) (state: BoxState) (removed: bool) =
+  if hasBus ctx state then Host.tool ("systemctl", unitStopArgs (busUnit name)) |> ignore
+  if hasSound ctx state then Host.tool ("systemctl", unitStopArgs (soundUnit name)) |> ignore
+  if removed && ctx.runtime <> "" && (hasBus ctx state || hasSound ctx state) then
+    Host.removeTree (hostBoxDir ctx name)
 
 let stop (ctx: Ctx) (name: string) : result<int, string> =
   let state = (find ctx name)?
   let stopped = if state.running then podman (stopArgs name) $"the box '{name}' did not stop" else Ok ""
-  unfiltered ctx name state false
+  unserved ctx name state false
   Result.map (fun _ -> 0) stopped
 
 let private purged (ctx: Ctx) (name: string) (failure: string) : result<int, string> =
@@ -162,7 +187,7 @@ let rm (ctx: Ctx) (name: string) (purge: bool) : result<int, string> =
     match podman (rmArgs name) $"the box '{name}' was not removed" with
     | Error e -> Error e
     | Ok _ ->
-      unfiltered ctx name state true
+      unserved ctx name state true
       if purge then purged ctx name $"the box is removed, but {dir} could not be deleted"
       else
         if Host.dirExists dir then

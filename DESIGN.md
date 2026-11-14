@@ -1,8 +1,8 @@
 # securebox — design
 
 Status: 2026-11-14. Implemented: the five commands and the `--share`, `--share-ro`,
-`--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants, with 136 unit
-tests and an end-to-end script of 214 checks against real podman. The code has had a correctness review
+`--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants, with 141 unit
+tests and an end-to-end script of 230 checks against real podman. The code has had a correctness review
 and an independent security review; appendix D lists what they found and what was done.
 
 securebox gives you a persistent, interactive Linux box from any container image, the way
@@ -129,7 +129,7 @@ podman's own mount and network columns, so the listing cannot drift from reality
 | `--publish [IP:]HOST:BOX[/udp]` (repeatable) | a port; bound to `127.0.0.1` unless an IP is given (podman's own default is all interfaces) |
 | `--gpu` | the GPU's render devices, `/dev/dri/renderD*` (not the display's card nodes) |
 | `--wayland` | the Wayland compositor's socket, for GUI programs; **turns SELinux confinement off for that box** |
-| `--sound` | the sound server's PulseAudio socket: playing and recording; **same cost** |
+| `--sound` | playing and recording, through a PulseAudio front-end of the box's own; **same cost** |
 | `--dbus NAME` (repeatable) | calls to that one name on the session bus, through a filter; **same cost** |
 
 **What the session grants cost.** `--wayland`, `--sound` and `--dbus` each mean a socket
@@ -155,13 +155,35 @@ other, and can use whatever protocols the compositor offers every client (on wlr
 compositors that may include screen capture and clipboard managers; GNOME and KDE restrict
 those). X11-only programs do not run.
 
-**`--sound`** mounts the directory of the PulseAudio socket (`$XDG_RUNTIME_DIR/pulse`,
-which PipeWire provides too) read-only into the box's runtime directory and sets
-`PULSE_SERVER`. The directory rather than the socket, so that a sound server that
-restarts is found again. A PulseAudio client can play, and it can record: the microphone,
-and the monitor of what other programs play. PipeWire's own socket is deliberately not
-shared: an unrestricted PipeWire client also sees cameras and screen-sharing streams.
-Verified with a real client: `pactl info` in a Fedora box names the host's server.
+**`--sound`** never gives the box the session's sound socket. The first version did, and
+that was a way out of the box: the session's `pipewire-pulse` takes `load-module` from
+whoever reaches its socket. Confirmed from inside a box: `module-pipe-sink` created a FIFO
+at a host path of the box's choosing, `module-native-protocol-tcp` put the sound server
+on a TCP port, and a module that loads a plugin by path would in all likelihood run it.
+
+So, as with D-Bus, the box gets a socket of its own with something in between: a second
+`pipewire-pulse`, run for that box as a unit of the user's systemd
+(`securebox-sound-NAME`). It reads a copy of the system's `pipewire-pulse.conf` with one
+override, through `PIPEWIRE_CONFIG_DIR` and `PULSE_RUNTIME_PATH`:
+
+```text
+pulse.properties = {
+    server.address = [ { address = "unix:RUNTIME/securebox/NAME/pulse/native" client.access = "restricted" } ]
+    pulse.allow-module-loading = false
+}
+```
+
+The directory of that socket is mounted read-only at the box's `pulse/`, and
+`PULSE_SERVER` points at it. Observed through it, from a box with `pactl`: the server
+answers, sinks and sources are listed, and `load-module` of `module-null-sink`,
+`module-pipe-sink`, `module-native-protocol-tcp` and `module-ladspa-sink` each fail with
+"Access denied"; playing and recording work. The session's own socket is untouched (and
+still takes `load-module`, which the end-to-end script uses as its control).
+
+A PulseAudio client can play, and it can record: the microphone, and the monitor of what
+other programs play. PipeWire's own socket is not shared: an unrestricted PipeWire client
+also sees cameras and screen-sharing streams. This grant needs PipeWire on the host; with
+the old PulseAudio daemon there is nothing to put in between, and `--sound` is refused.
 
 **`--dbus NAME`** never gives the box the session bus. Whoever holds that bus can call
 `org.freedesktop.systemd1` and have any command run as the user, or ask the secret service
@@ -181,7 +203,13 @@ in a Fedora box gets the notification server's answer, and is refused systemd.
   start it when it is not running; `stop` and `rm` stop it. This grant therefore needs
   `xdg-dbus-proxy` and a systemd user session on the host.
 - The names are kept in the container's label `securebox.dbus`, read back only for a
-  container already established as the box (section 4) and validated again before use.
+  container already established as the box (section 4) and validated again before use. A
+  label given at `create` wins over the same label in an image (checked).
+- **A grant is recognised by securebox's own directory bound in place**, not by something
+  being mounted where the grant goes. Only bind mounts are read from `inspect` at all: an
+  image can declare volumes anywhere and carry any label, and the first version, which
+  looked at the destination alone, started a filter with an image's names for a box
+  created without `--dbus` (the box could not reach it; it should still never start).
 - A program that only needs a bus to exist (to register itself, say) can run one inside
   the box with `dbus-run-session`; that needs no grant. There are no portals: they treat a
   caller that is not a Flatpak as a trusted host program.
@@ -213,9 +241,9 @@ podman create
   [--security-opt label=disable                             # with any session grant
    --mount type=tmpfs,dst=/run/user/UID,tmpfs-mode=0700,chown=true]
   [--mount type=bind,src=SOCKET,dst=/run/user/UID/wayland-0]              # --wayland
-  [--mount type=bind,src=RUNTIME/pulse,dst=/run/user/UID/pulse,ro]        # --sound
-  [--label securebox.dbus=NAME,NAME                                       # --dbus
-   --mount type=bind,src=RUNTIME/securebox/NAME,dst=/run/user/UID/dbus,ro]
+  [--mount type=bind,src=RUNTIME/securebox/NAME/pulse,dst=/run/user/UID/pulse,ro]   # --sound
+  [--label securebox.dbus=NAME,NAME                                                 # --dbus
+   --mount type=bind,src=RUNTIME/securebox/NAME/dbus,dst=/run/user/UID/dbus,ro]
   IMAGE
 podman start NAME
 podman exec NAME sh -c '…read /etc/passwd…' sh UID USER HOME              # as the user
@@ -242,20 +270,25 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
   programs reading the home from passwd (OpenSSH) find the box's. A box that did not stay
   up makes `create` fail, and say that the image needs a `sleep`.
 - A home directory left by an earlier box of the same name is reused, and `create` says so.
-- With `--dbus`, the filter is started before `podman create`, so that its directory
-  exists to be mounted:
+- With `--dbus` or `--sound`, the filter and the front-end are started before
+  `podman create`, so that their directories exist to be mounted:
 
   ```text
   systemctl --user is-active --quiet securebox-dbus-NAME        # running already?
   systemd-run --user --quiet --collect --unit securebox-dbus-NAME --
-    xdg-dbus-proxy BUS_ADDRESS RUNTIME/securebox/NAME/bus --filter --talk=NAME…
+    xdg-dbus-proxy BUS_ADDRESS RUNTIME/securebox/NAME/dbus/bus --filter --talk=NAME…
+
+  systemctl --user is-active --quiet securebox-sound-NAME
+  systemd-run --user --quiet --collect --unit securebox-sound-NAME
+    --setenv PIPEWIRE_CONFIG_DIR=RUNTIME/securebox/NAME/sound
+    --setenv PULSE_RUNTIME_PATH=RUNTIME/securebox/NAME/pulse -- pipewire-pulse
   ```
 
 ### enter
 
 ```text
 1. podman inspect --type container --format
-     '{{.Name}}|{{.State.Status}}|{{json (index .Config.Labels "securebox")}}{{range .Mounts}}{{"\n"}}{{.Source}}{{"\t"}}{{.Destination}}{{end}}' NAME
+     '{{.Name}}|{{.State.Status}}|{{json (index .Config.Labels "securebox")}}{{range .Mounts}}{{"\n"}}{{.Type}}{{"\t"}}{{.Source}}{{"\t"}}{{.Destination}}{{end}}' NAME
 2. podman start NAME                       # only when not running
 3. podman exec --interactive [--tty] --detach-keys= [--user 0]
      --env HOME=HOME --env USER=USER --workdir W --env SECUREBOX=NAME
@@ -284,11 +317,10 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
 - Without `CMD`, the box's shell is found in the box, preferring the host's `$SHELL` name:
   `sh -c 'exec "$(command -v "$0" || command -v bash || echo sh)" -l' zsh`.
 - `HOME` and `USER` are always passed explicitly.
-- A stopped box with `--wayland` or `--sound` is started only when the compositor's or
-  the sound server's socket is there; otherwise `enter` says so instead of letting podman
-  fail on the missing mount source.
-- For a `--dbus` box, `enter` first makes sure the filter is running, starting it with the
-  names from the box's label when it is not.
+- A stopped `--wayland` box is started only when the compositor's socket is there;
+  otherwise `enter` says so instead of letting podman fail on the missing mount source.
+- For a `--dbus` or `--sound` box, `enter` first makes sure the filter or the front-end is
+  running, starting it (the filter with the names from the box's label) when it is not.
 - The exit code is the command's. securebox's own failures exit 125, as podman's do.
 
 ### list, stop, rm
@@ -296,7 +328,7 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
 ```text
 podman ps --all --filter label=securebox=1 --format 'table {{.Names}}\t{{.State}}\t{{.Image}}\t{{.Mounts}}\t{{.Networks}}\t{{.Ports}}'
 podman stop NAME
-podman rm --force NAME
+podman rm --force --volumes NAME          # with the anonymous volumes its image declared
 podman unshare rm -rf -- DATA/NAME        # with --purge only
 ```
 
@@ -393,8 +425,10 @@ effect Host =
   abstract realPath   : string -> string                               // "" when it isn't there
   abstract ensureDir  : string -> result<unit, string>                 // with parents, mode 0700
   abstract tool       : string * list<string> -> int                   // systemctl, systemd-run
-  abstract remove     : string -> unit                                 // a file or an empty directory
-  abstract awaitPath  : string -> bool                                 // the filter's socket
+  abstract removeTree : string -> unit                                 // a stale socket; a box's session directory
+  abstract writeFile  : string * string -> result<unit, string>        // the sound front-end's
+  abstract copyFile   : string * string -> result<unit, string>        //   configuration
+  abstract awaitPath  : string -> bool                                 // a unit's socket
   abstract say        : string -> unit                                 // a line for the user
 ```
 
@@ -544,8 +578,8 @@ zs test                                                     # every member's tes
 cd app && zs build --release --target x86_64-linux-musl     # the static binary
 ```
 
-- The release build is a static binary cross-linked through `zig cc`: 442 KB for x86-64,
-  448 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
+- The release build is a static binary cross-linked through `zig cc`: 504 KB for x86-64,
+  505 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
   arguments takes about half a millisecond.
 - Build needs: Z# 0.7.1 (`.toolchain/`, not committed), clang 23+, zig.
 - Runtime needs: podman 5.3 or later (`--hosts-file`), with pasta, its rootless network
@@ -555,13 +589,13 @@ cd app && zs build --release --target x86_64-linux-musl     # the static binary
 
 ## 9. Testing
 
-- **Unit (`zs test`, 136 tests):** validation tables and a property test (no accepted name
+- **Unit (`zs test`, 141 tests):** validation tables and a property test (no accepted name
   starts with `-` or contains `/`); `expect` tests of `createArgs` and `execArgs`, which
   pin the security flags, and a test that labelling is never off without a session grant; the
   ownership check against an image's label, another data directory and an id prefix; the
   command flows under the recording `Host` handler; argz parse tables and `expect` tests
   of usage text; the posix functions.
-- **End to end (`tests/e2e.sh`, 214 checks):** the built binary against real podman, on
+- **End to end (`tests/e2e.sh`, 230 checks):** the built binary against real podman, on
   Fedora, Ubuntu and Alpine images: every row of section 3's table probed from inside the
   box, shares, exit codes, the lifecycle, the grants (the session grants included, where
   the session has a compositor, a sound server and a bus), refusals, and containers that are not securebox's. It keeps its
@@ -668,7 +702,7 @@ What Z# 0.7.1 does that the design had to follow, for whoever writes M1:
 ## Appendix C: end-to-end results
 
 `tests/e2e.sh` on podman 6.1.3 (rootless, crun, pasta, SELinux enforcing, a GNOME Wayland
-session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 214 passed,
+session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 230 passed,
 0 failed.
 
 Per image: the home starts empty; the uid, `HOME` and passwd entry; zero capabilities,
@@ -682,8 +716,12 @@ files included.
 Once: `--network host` as the control for the network checks; `--network none`; the
 host's proxy variables kept out; `--gpu` with render nodes only; a `--wayland` box (the
 socket alone in a private runtime directory, the compositor answering, capabilities and
-no-new-privileges unchanged); a `--sound` box (the socket's directory alone, read-only,
-the server answering); a `--dbus` box (the filter running as a user unit, only the granted
+no-new-privileges unchanged); a `--sound` box (its front-end running as a user unit, the
+session's own socket not mounted, the server answering through it, three `load-module`
+requests refused where the session's own socket accepts one, the front-end stopped by
+`stop`, restarted by `enter`, gone after `rm`); a box from an image that declares volumes
+where the grants go and carries the `--dbus` label (no filter, no front-end, and its
+anonymous volumes removed with it); a `--dbus` box (the filter running as a user unit, only the granted
 name visible through it, systemd and the secret service refused, the filter stopped by
 `stop`, restarted by `enter`, gone after `rm`); twenty-one refusals, those about the home against a fake one (the home under each
 name, links to it, the runtime and data directories, an empty path, a remote podman, …);
@@ -725,6 +763,18 @@ the code before it was fixed, and each fix has a unit or end-to-end test.
 Reviewed and found sound: no user-controlled string becomes a podman option or an extra
 field of `--mount` or `--passwd-entry`; values reach the in-box shell scripts as positional
 parameters, never as script text; the C shim's bounds; the argument parser.
+
+A second pass, on the session grants, before they had an independent review of their own:
+
+| Finding | Severity | What was done |
+|---|---|---|
+| `--sound` gave the box the session's PulseAudio socket, and the session's sound server takes `load-module` from it (confirmed: a FIFO created at a host path, a TCP listener opened) | high | the box gets a front-end of its own with module loading off; the session's socket is never mounted |
+| Grants were recognised by mount destination, so an image declaring a volume there, with a `securebox.dbus` label, had a filter started with its names (confirmed; the box could not reach it) | low | a grant is securebox's own directory bound in place; only bind mounts are read |
+| `rm` left an image's anonymous volumes behind | bug | `rm --force --volumes` |
+
+Checked and found sound in that pass: the D-Bus filter refuses the bus driver's
+`UpdateActivationEnvironment`, `StartServiceByName` for a name not granted, and
+`BecomeMonitor`; other connections cannot be introspected through it.
 
 Left as it is, knowingly: the share check cannot stop a user who shares a directory and
 then replaces part of its path with a link while the box exists (the mount is fixed at

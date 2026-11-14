@@ -88,13 +88,36 @@ let tests =
         type=tmpfs,dst=/run/user/1000,tmpfs-mode=0700,chown=true
         type=bind,src=/run/user/1000/wayland-1,dst=/run/user/1000/wayland-0
         """)
-    test "create --sound: the PulseAudio socket's directory, read-only" (fun () ->
+    test "create --sound: the front-end's directory, read-only; never the session's own socket" (fun () ->
       let plain = createArgs ctx { name = "gui"; image = "fedora:45" }
-      let sound = createArgs ctx { name = "gui"; image = "fedora:45"; sound = Some "/run/user/1000/pulse" }
+      let sound = createArgs ctx { name = "gui"; image = "fedora:45"; sound = true }
       expect (lines (List.filter (fun a -> not (List.contains a plain)) sound)) """
         label=disable
         type=tmpfs,dst=/run/user/1000,tmpfs-mode=0700,chown=true
-        type=bind,src=/run/user/1000/pulse,dst=/run/user/1000/pulse,ro
+        type=bind,src=/run/user/1000/securebox/gui/pulse,dst=/run/user/1000/pulse,ro
+        """
+      assert (not (List.exists (String.contains "src=/run/user/1000/pulse") sound)))
+    test "the sound front-end: its own socket, restricted clients, no module loading" (fun () ->
+      expect (soundOverride ctx "gui") """
+        # written by securebox: the sound front-end of the box gui
+        pulse.properties = {
+            server.address = [ { address = "unix:/run/user/1000/securebox/gui/pulse/native" client.access = "restricted" } ]
+            pulse.allow-module-loading = false
+        }
+
+        """
+      expect (lines (soundStartArgs ctx "gui")) """
+        --user
+        --quiet
+        --collect
+        --unit
+        securebox-sound-gui
+        --setenv
+        PIPEWIRE_CONFIG_DIR=/run/user/1000/securebox/gui/sound
+        --setenv
+        PULSE_RUNTIME_PATH=/run/user/1000/securebox/gui/pulse
+        --
+        pipewire-pulse
         """)
     test "create --dbus: the filter's directory and the names, never the session bus itself" (fun () ->
       let plain = createArgs ctx { name = "gui"; image = "fedora:45" }
@@ -103,7 +126,7 @@ let tests =
         label=disable
         type=tmpfs,dst=/run/user/1000,tmpfs-mode=0700,chown=true
         securebox.dbus=org.freedesktop.Notifications,org.example.App
-        type=bind,src=/run/user/1000/securebox/gui,dst=/run/user/1000/dbus,ro
+        type=bind,src=/run/user/1000/securebox/gui/dbus,dst=/run/user/1000/dbus,ro
         """
       assert (not (List.exists (String.contains "/run/user/1000/bus") dbus)))
     test "the D-Bus filter: only the names granted are let through" (fun () ->
@@ -116,7 +139,7 @@ let tests =
         --
         xdg-dbus-proxy
         unix:path=/run/user/1000/bus
-        /run/user/1000/securebox/gui/bus
+        /run/user/1000/securebox/gui/dbus/bus
         --filter
         --talk=org.freedesktop.Notifications
         --talk=org.example.App
@@ -172,19 +195,29 @@ let tests =
     test "a box with session grants is told where they are" (fun () ->
       let state mounts = parseInspect (Fixture.inspected "gui" "running" "\"1\"" mounts)
       let wayland = ("/run/user/1000/wayland-1", "/run/user/1000/wayland-0")
-      let sound = ("/run/user/1000/pulse", "/run/user/1000/pulse")
-      let bus = ("/run/user/1000/securebox/gui", "/run/user/1000/dbus")
+      let sound = ("/run/user/1000/securebox/gui/pulse", "/run/user/1000/pulse")
+      let bus = ("/run/user/1000/securebox/gui/dbus", "/run/user/1000/dbus")
       assert (sessionEnv ctx (state [ dev ]) = [])
       assert (sessionEnv ctx (state [ wayland ]) = [ "XDG_RUNTIME_DIR=/run/user/1000"; "WAYLAND_DISPLAY=wayland-0" ])
       assert (sessionEnv ctx (state [ wayland; sound; bus ])
               = [ "XDG_RUNTIME_DIR=/run/user/1000"; "WAYLAND_DISPLAY=wayland-0"; "PULSE_SERVER=unix:/run/user/1000/pulse/native"
                   "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/dbus/bus" ])
       assert (hasBus ctx (state [ bus ]) && not (hasBus ctx (state [ wayland; sound ])))
-      assert (List.map snd (sessionNeeds ctx (state [ wayland; sound; bus ])) = [ "/run/user/1000/wayland-1"; "/run/user/1000/pulse/native" ])
-      // none of them is a share, though the sound directory has one path on both sides
+      assert (hasSound ctx (state [ sound ]) && not (hasSound ctx (state [ wayland; bus ])))
+      assert (List.map snd (sessionNeeds ctx (state [ wayland; sound; bus ])) = [ "/run/user/1000/wayland-1" ])
       assert (shares ctx (state [ dev; wayland; sound; bus; ("/srv/data", "/srv/data") ]) = [ "/srv/data" ])
       let told = execArgs ctx "gui" false (sessionEnv ctx (state [ wayland ])) "/home/ada" [ "foot" ]
       assert (String.contains "--env XDG_RUNTIME_DIR=/run/user/1000 --env WAYLAND_DISPLAY=wayland-0 " (String.join " " told)))
+    test "a grant is securebox's own directory bound in place, not whatever is mounted there" (fun () ->
+      // an image can declare volumes at these places, and bring a label along
+      let volumes = Fixture.inspected "gui" "running" "\"1\"" [ dev ] |> Fixture.withVolume "/run/user/1000/dbus" |> Fixture.withVolume "/run/user/1000/pulse" |> Fixture.withVolume "/run/user/1000/wayland-0"
+      let state = parseInspect volumes
+      assert (not (hasBus ctx state) && not (hasSound ctx state) && sessionEnv ctx state = [] && sessionNeeds ctx state = [])
+      // nor does another directory bound there count: the session's own sound socket, say
+      let other = parseInspect (Fixture.inspected "gui" "running" "\"1\"" [ ("/run/user/1000/pulse", "/run/user/1000/pulse"); ("/run/user/1000", "/run/user/1000/dbus") ])
+      assert (not (hasBus ctx other) && not (hasSound ctx other) && sessionEnv ctx other = []))
+    test "rm takes the image's anonymous volumes with the box" (fun () ->
+      assert (rmArgs "dev" = [ "rm"; "--force"; "--volumes"; "dev" ]))
     test "inspect's output" (fun () ->
       let state = parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev; ("/srv/data", "/srv/data") ])
       let mounted = state.mounts = [ dev; ("/srv/data", "/srv/data") ]

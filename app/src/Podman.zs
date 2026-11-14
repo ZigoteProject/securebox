@@ -9,7 +9,8 @@ type BoxState =
     /// It carries securebox's label. An image can carry it too, so this alone doesn't make
     /// the container a box: `ours` does.
     labelled: bool
-    /// Its mounts, each as source and destination.
+    /// Its bind mounts, each as source and destination. Only binds: they come from the
+    /// command line that made the container, where a volume can be the image's doing.
     mounts: list<string * string> }
 
 /// The directory securebox keeps for a box, and the home directory inside it.
@@ -24,9 +25,17 @@ let waylandSocket (ctx: Ctx) = $"/run/user/{ctx.uid}/wayland-0"
 let pulseDir (ctx: Ctx) = $"/run/user/{ctx.uid}/pulse"
 let busDir (ctx: Ctx) = $"/run/user/{ctx.uid}/dbus"
 
-/// On the host: where a box's D-Bus filter listens, and the unit it runs as.
-let hostBusDir (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}"
+/// On the host, in the session's runtime directory: what securebox keeps for a box's
+/// session grants. The D-Bus filter's socket and the sound front-end's are each in a
+/// directory of their own, which is what the box gets; the front-end's configuration is not.
+let hostBoxDir (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}"
+let hostBusDir (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}/dbus"
+let hostSoundDir (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}/pulse"
+let hostSoundConf (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}/sound"
+
+/// The units of the user's systemd that the filter and the front-end run as.
 let busUnit (name: string) = $"securebox-dbus-{name}"
+let soundUnit (name: string) = $"securebox-sound-{name}"
 
 let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
   let share (s: Share) =
@@ -40,7 +49,7 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
   // SELinux lets a confined container connect to one only with labelling off, so that is
   // what each of these grants costs. They share one runtime directory of the box's own.
   let session =
-    if Option.isSome spec.wayland || Option.isSome spec.sound || spec.dbus <> [] then
+    if Option.isSome spec.wayland || spec.sound || spec.dbus <> [] then
       [ "--security-opt"; "label=disable"
         "--mount"; $"type=tmpfs,dst={runtimeDir ctx},tmpfs-mode=0700,chown=true" ]
     else []
@@ -50,9 +59,7 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
     | None -> []
   // directories, not the sockets: a server that restarts makes a new socket in the same place
   let sound =
-    match spec.sound with
-    | Some dir -> [ "--mount"; $"type=bind,src={dir},dst={pulseDir ctx},ro" ]
-    | None -> []
+    if spec.sound then [ "--mount"; $"type=bind,src={hostSoundDir ctx spec.name},dst={pulseDir ctx},ro" ] else []
   let dbus =
     if spec.dbus <> [] then
       [ "--label"; "securebox.dbus=" + String.join "," spec.dbus
@@ -82,14 +89,15 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
 /// printed as JSON, so whatever an image put in it stays on that line.
 let inspectArgs (name: string) =
   [ "inspect"; "--type"; "container"; "--format"
-    "{{.Name}}|{{.State.Status}}|{{json (index .Config.Labels \"securebox\")}}{{range .Mounts}}{{\"\\n\"}}{{.Source}}{{\"\\t\"}}{{.Destination}}{{end}}"
+    "{{.Name}}|{{.State.Status}}|{{json (index .Config.Labels \"securebox\")}}{{range .Mounts}}{{\"\\n\"}}{{.Type}}{{\"\\t\"}}{{.Source}}{{\"\\t\"}}{{.Destination}}{{end}}"
     name ]
 
-/// Reads `inspectArgs`' output: `dev|running|"1"`, then `source<TAB>destination` lines.
+/// Reads `inspectArgs`' output: `dev|running|"1"`, then a `type<TAB>source<TAB>destination`
+/// line per mount, of which the binds are kept.
 let parseInspect (output: string) : BoxState =
   let mount (line: string) =
     match String.split "\t" line with
-    | [ source; destination ] -> Some (source, destination)
+    | [ "bind"; source; destination ] -> Some (source, destination)
     | _ -> None
   match String.splitLines (String.trim output) with
   | first :: rest ->
@@ -116,24 +124,23 @@ let shares (ctx: Ctx) (state: BoxState) =
 let private mountedAt (destination: string) (state: BoxState) =
   state.mounts |> List.tryFind (fun (_, d) -> d = destination) |> Option.map fst
 
-/// Whether the box was created with `--dbus`.
-let hasBus (ctx: Ctx) (state: BoxState) = Option.isSome (mountedAt (busDir ctx) state)
+/// Whether the box was created with `--dbus` or `--sound`: it has securebox's own
+/// directory for it bound where the grant goes. Nothing an image declares looks like that.
+let hasBus (ctx: Ctx) (state: BoxState) = mountedAt (busDir ctx) state = Some (hostBusDir ctx state.name)
+let hasSound (ctx: Ctx) (state: BoxState) = mountedAt (pulseDir ctx) state = Some (hostSoundDir ctx state.name)
 
 /// What a box with session grants needs from the host to start: each as what it is and
-/// where it must be. (The D-Bus filter is started by securebox itself.)
+/// where it must be. (The D-Bus filter and the sound front-end are started by securebox.)
 let sessionNeeds (ctx: Ctx) (state: BoxState) : list<string * string> =
-  List.concat [
-    Option.toList (Option.map (fun s -> ("the Wayland compositor's socket", s)) (mountedAt (waylandSocket ctx) state))
-    Option.toList (Option.map (fun d -> ("the sound server's socket", d + "/native")) (mountedAt (pulseDir ctx) state)) ]
+  Option.toList (Option.map (fun s -> ("the Wayland compositor's socket", s)) (mountedAt (waylandSocket ctx) state))
 
 /// The environment that tells programs in the box where its session grants are.
 let sessionEnv (ctx: Ctx) (state: BoxState) : list<string> =
-  let granted destination = Option.isSome (mountedAt destination state)
   let each =
     List.concat [
-      (if granted (waylandSocket ctx) then [ "WAYLAND_DISPLAY=wayland-0" ] else [])
-      (if granted (pulseDir ctx) then [ $"PULSE_SERVER=unix:{pulseDir ctx}/native" ] else [])
-      (if granted (busDir ctx) then [ $"DBUS_SESSION_BUS_ADDRESS=unix:path={busDir ctx}/bus" ] else []) ]
+      (if Option.isSome (mountedAt (waylandSocket ctx) state) then [ "WAYLAND_DISPLAY=wayland-0" ] else [])
+      (if hasSound ctx state then [ $"PULSE_SERVER=unix:{pulseDir ctx}/native" ] else [])
+      (if hasBus ctx state then [ $"DBUS_SESSION_BUS_ADDRESS=unix:path={busDir ctx}/bus" ] else []) ]
   if each = [] then [] else $"XDG_RUNTIME_DIR={runtimeDir ctx}" :: each
 
 /// A `--dbus` box's names, as `create` wrote them in its label.
@@ -143,8 +150,8 @@ let busLabelArgs (name: string) =
 /// The D-Bus filter of a box, run by the user's systemd so that it outlives securebox:
 /// xdg-dbus-proxy between the session bus and a socket of the box's, letting through only
 /// calls to the names granted.
-let proxyActiveArgs (name: string) = [ "--user"; "is-active"; "--quiet"; busUnit name ]
-let proxyStopArgs (name: string) = [ "--user"; "stop"; busUnit name ]
+let unitActiveArgs (unit: string) = [ "--user"; "is-active"; "--quiet"; unit ]
+let unitStopArgs (unit: string) = [ "--user"; "stop"; unit ]
 let proxyStartArgs (ctx: Ctx) (name: string) (names: list<string>) =
   List.concat [
     [ "--user"; "--quiet"; "--collect"; "--unit"; busUnit name; "--"; "xdg-dbus-proxy" ]
@@ -159,7 +166,8 @@ let workdir (ctx: Ctx) (shared: list<string>) =
 let existsArgs (name: string) = [ "container"; "exists"; name ]
 let startArgs (name: string) = [ "start"; name ]
 let stopArgs (name: string) = [ "stop"; name ]
-let rmArgs (name: string) = [ "rm"; "--force"; name ]
+/// With the anonymous volumes an image declared, which nothing else would ever remove.
+let rmArgs (name: string) = [ "rm"; "--force"; "--volumes"; name ]
 
 /// Deletes a box's directory inside podman's user namespace: files the box's root made are
 /// owned by a subordinate uid there, which the user alone cannot remove.
@@ -172,6 +180,24 @@ let listArgs =
 /// The box's own shell: the user's, when the box has it, then bash, then sh.
 let private shellCommand (shell: string) =
   [ "sh"; "-c"; "exec \"$(command -v \"$0\" || command -v bash || echo sh)\" -l"; shell ]
+
+/// The sound front-end of a box: a pipewire-pulse of its own, beside the session's, that
+/// listens only in the box's directory and takes no `load-module`. The session's sound
+/// server does take them from whoever reaches its socket, and a module can make files and
+/// open ports on the host, which is why the box never gets that socket.
+let soundConfigFiles = [ "/etc/pipewire/pipewire-pulse.conf"; "/usr/share/pipewire/pipewire-pulse.conf" ]
+let soundOverride (ctx: Ctx) (name: string) =
+  String.concat [
+    "# written by securebox: the sound front-end of the box " + name + "\n"
+    "pulse.properties = {\n"
+    "    server.address = [ { address = \"unix:" + hostSoundDir ctx name + "/native\" client.access = \"restricted\" } ]\n"
+    "    pulse.allow-module-loading = false\n"
+    "}\n" ]
+let soundStartArgs (ctx: Ctx) (name: string) =
+  [ "--user"; "--quiet"; "--collect"; "--unit"; soundUnit name
+    "--setenv"; $"PIPEWIRE_CONFIG_DIR={hostSoundConf ctx name}"
+    "--setenv"; $"PULSE_RUNTIME_PATH={hostSoundDir ctx name}"
+    "--"; "pipewire-pulse" ]
 
 let execArgs (ctx: Ctx) (name: string) (root: bool) (session: list<string>) (dir: string) (cmd: list<string>) : list<string> =
   List.concat [

@@ -15,7 +15,7 @@ securebox stop web
 securebox rm web                                       # keeps the box's home; --purge deletes it
 ```
 
-One static binary of about 440 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
+One static binary of about 500 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
 0.7.1. Podman is the only thing it needs at run time, and it is rootless only: securebox
 refuses to run as root.
 
@@ -78,7 +78,7 @@ All off by default, all given to `create`, all visible in `securebox list`.
 | `-p`, `--publish [IP:]HOST:BOX[/udp]` | a port, bound to `127.0.0.1` unless you give an address (repeatable) |
 | `--gpu` | the GPU's render devices (`/dev/dri/renderD*`) |
 | `--wayland` | the Wayland compositor's socket, for GUI programs (*) |
-| `--sound` | the sound server's PulseAudio socket: playing and recording (*) |
+| `--sound` | playing and recording sound, through a front-end of the box's own (*) |
 | `--dbus NAME` | calls to that one name on your session bus, through a filter (repeatable) (*) |
 
 (*) These three reach into your desktop session, and on an SELinux host a box with any of
@@ -99,9 +99,12 @@ holds only what was granted, and `enter` tells programs where each thing is.
 - **`--wayland`**: the compositor's socket. Wayland programs open their windows on your
   desktop; add `--gpu` for accelerated rendering. A Wayland client can do what the
   compositor lets any client do; on GNOME and KDE that excludes capturing the screen.
-- **`--sound`**: the PulseAudio socket, which PipeWire provides too. Programs can play
-  sound, and also **record**: the microphone, and what other programs are playing.
-  PipeWire's own socket is not shared, so cameras and screen sharing stay out of reach.
+- **`--sound`**: programs can play sound, and also **record**: the microphone, and what
+  other programs are playing. The box does not get your sound server's socket: whoever has
+  that can make the server load modules, which create files and open network ports on the
+  host. It gets the socket of a second PulseAudio front-end that securebox runs for the box
+  alone, with module loading turned off. PipeWire's own socket is not shared either, so
+  cameras and screen sharing stay out of reach. Needs PipeWire on the host.
 - **`--dbus NAME`**: the box may call that one name on your session bus, for instance
   `--dbus org.freedesktop.Notifications`. It never gets the bus itself. Whoever holds the
   session bus can ask systemd to run any command as you, or ask the keyring for your
@@ -116,9 +119,10 @@ with SELinux labelling disabled. Its other protections are unchanged (own home, 
 capabilities, no-new-privileges, seccomp, private network, nothing else of the session),
 and boxes created without these flags keep their confinement.
 
-Such a box needs what it was granted in order to start (the compositor, the sound server),
-and after you log out and in again a `--wayland` box needs `securebox stop NAME` before
-the next `enter`. `--dbus` needs `xdg-dbus-proxy` and a systemd user session on the host.
+A `--wayland` box needs the compositor running to start, and after you log out and in
+again it needs `securebox stop NAME` before the next `enter`. `--sound` and `--dbus` run
+their front-end and filter as units of your systemd user session, started by `create` and
+`enter` and stopped by `stop` and `rm`; `--dbus` needs `xdg-dbus-proxy` on the host.
 There are no portals, and X11-only programs do not run.
 
 Grants are fixed when the box is created. To change them, remove the box and create it
@@ -147,8 +151,8 @@ cp build/securebox ~/.local/bin/
 ## Testing
 
 ```sh
-zs test            # 136 unit tests: validation, the exact podman arguments, the command flows
-tests/e2e.sh       # 214 checks with real podman, on Fedora, Ubuntu and Alpine images
+zs test            # 141 unit tests: validation, the exact podman arguments, the command flows
+tests/e2e.sh       # 230 checks with real podman, on Fedora, Ubuntu and Alpine images
 ```
 
 The end-to-end script creates boxes named `sbx-e2e-<pid>-*`, keeps their data in a

@@ -16,8 +16,8 @@ let ctx : Ctx =
 let links = [ ("/srv/to-ssh", "/var/home/ada/.ssh"); ("/srv/to-web", "/home/ada/Projects/web") ]
 
 /// Runs `app` with podman answered by `answer` (from its arguments) and the paths in
-/// `present` existing: the result, and what was asked of the host, in order. A box's D-Bus
-/// filter is running when `present` has "filter".
+/// `present` existing: the result, and what was asked of the host, in order. A box's
+/// units (its D-Bus filter, its sound front-end) are running when `present` has "units".
 let record (answer: list<string> -> ProcessResult) (present: list<string>) (app: unit -> 'a) =
   let mutable calls = []
   let result =
@@ -39,17 +39,30 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
       k (Ok ())
     | Host.tool (program, args), k ->
       calls <- (program + " " + String.join " " args) :: calls
-      k (if List.contains "is-active" args && not (List.contains "filter" present) then 3 else 0)
-    | Host.remove path, k ->
+      k (if List.contains "is-active" args && not (List.contains "units" present) then 3 else 0)
+    | Host.removeTree path, k ->
       calls <- ("remove " + path) :: calls
       k ()
+    | Host.writeFile (path, _), k ->
+      calls <- ("write " + path) :: calls
+      k (Ok ())
+    | Host.copyFile (source, target), k ->
+      calls <- ($"copy {source} {target}") :: calls
+      k (Ok ())
     | Host.awaitPath _, k -> k true
     | Host.say _, k -> k ()
   (result, List.rev calls)
 
-/// What `podman inspect` prints for a container, as `Podman.inspectArgs` asks for it.
+/// What `podman inspect` prints for a container, as `Podman.inspectArgs` asks for it: the
+/// mounts given are bind mounts.
 let inspected (name: string) (status: string) (label: string) (mounts: list<string * string>) =
-  $"{name}|{status}|{label}\n" + String.concat (List.map (fun (source, destination) -> $"{source}\t{destination}\n") mounts)
+  $"{name}|{status}|{label}\n" + String.concat (List.map (fun (source, destination) -> $"bind\t{source}\t{destination}\n") mounts)
+
+/// The same, followed by a volume an image declared.
+let withVolume (destination: string) (state: string) = state + $"volume\t/var/lib/containers/volumes/x/_data\t{destination}\n"
+
+/// What the host must have for a sound front-end to be started.
+let pipewire = [ "/run/user/1000/pipewire-0"; "/usr/share/pipewire/pipewire-pulse.conf" ]
 
 /// The home mount that makes a container the box `dev`.
 let devHome = ("/home/ada/.local/share/securebox/dev/home", "/home/ada")

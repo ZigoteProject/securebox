@@ -16,8 +16,10 @@ effect Host =
   /// Runs a program of the host's (systemd's, for the D-Bus filter) and waits: its exit
   /// code, 127 when it couldn't start.
   abstract tool : string * list<string> -> int
-  /// Deletes a file or an empty directory, if it is there.
-  abstract remove : string -> unit
+  /// Deletes a file, or a directory and what is in it, if it is there.
+  abstract removeTree : string -> unit
+  abstract writeFile : string * string -> result<unit, string>
+  abstract copyFile : string * string -> result<unit, string>
   /// Waits a moment for a path to appear; whether it did.
   abstract awaitPath : string -> bool
   /// A line for the user.
@@ -54,10 +56,12 @@ let real (app: unit -> 'a) =
     k (match Process.run program args with
        | Ok r -> r.code
        | Error _ -> 127)
-  | Host.remove path, k ->
-    if Directory.exists path then Directory.delete path |> ignore
+  | Host.removeTree path, k ->
+    if Directory.exists path then Directory.deleteRecursive path |> ignore
     else if Posix.exists path then File.delete path |> ignore
     k ()
+  | Host.writeFile (path, text), k -> k (File.writeAllText path text)
+  | Host.copyFile (source, target), k -> k (File.copy source target)
   | Host.awaitPath path, k -> k (appears path 60)
   | Host.say line, k ->
     eprintln line

@@ -19,8 +19,8 @@ type CreateSpec =
     devices: list<string> = []
     /// The compositor's socket on the host (`--wayland`).
     wayland: option<string> = None
-    /// The directory of the sound server's PulseAudio socket on the host (`--sound`).
-    sound: option<string> = None
+    /// Sound, through a front-end of the box's own to the sound server (`--sound`).
+    sound: bool = false
     /// The names on the session bus the box may talk to (`--dbus`).
     dbus: list<string> = [] }
 
@@ -83,6 +83,16 @@ let mountable (path: string) : result<string, string> =
   else if List.exists (fun c -> isControl c || c = ',' || c = ':') (String.chars path) then
     Error $"'{path}' has a comma, a colon or a control character, which a mount cannot be written with"
   else Ok path
+
+/// The session's runtime directory: securebox keeps its sockets for a box in it, and
+/// writes the path into a configuration file, where a quote or a backslash has a meaning.
+let runtimePath (path: string) : result<string, string> =
+  match mountable path with
+  | Error e -> Error e
+  | Ok _ ->
+    if List.exists (fun c -> c = '"' || c = '\\' || c = ' ' || c = '=') (String.chars path) then
+      Error $"'{path}' has a quote, a backslash, a space or an equals sign, which securebox cannot write it with"
+    else Ok path
 
 /// The home directory: it is also written into a sed script that fixes the box's passwd
 /// entry, where `|`, `&` and `\` have a meaning.

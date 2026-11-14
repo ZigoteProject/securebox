@@ -218,21 +218,43 @@ if [ -S "$socket" ]; then
   "$SB" rm "$name" --purge >/dev/null 2>&1
 fi
 
-pulse="${XDG_RUNTIME_DIR:-}/pulse/native"
-if [ -S "$pulse" ]; then
+if [ -S "${XDG_RUNTIME_DIR:-}/pipewire-0" ] && command -v pipewire-pulse >/dev/null; then
   name="$prefix-sound"
   boxes+=("$name")
+  unit="securebox-sound-$name"
+  front="$XDG_RUNTIME_DIR/securebox/$name/pulse/native"
   "$SB" create "$name" "$image" --sound >/dev/null 2>&1
   is "$t --sound: create" 0 $?
-  is "$t --sound: PULSE_SERVER is the socket in the box's own runtime directory" "socket" "$(box 'test -S "${PULSE_SERVER#unix:}" && echo socket')"
+  is "$t --sound: the box's front-end runs as a unit of the user's" "active" "$(systemctl --user is-active "$unit" 2>&1)"
+  is "$t --sound: PULSE_SERVER is a socket in the box's own runtime directory" "socket" "$(box 'test -S "${PULSE_SERVER#unix:}" && echo socket')"
   is "$t --sound: that directory holds nothing else of the session" "pulse" "$(box 'ls -A "$XDG_RUNTIME_DIR" | tr "\n" " " | sed "s/ $//"')"
   has "$t --sound: the socket's directory is read-only" "denied" "$(box 'touch "$XDG_RUNTIME_DIR/pulse/x" 2>/dev/null || echo denied')"
+  hasnt "$t --sound: the session's own sound socket is not what is mounted" " $XDG_RUNTIME_DIR/pulse " "$(podman inspect --type container --format '{{range .Mounts}} {{.Source}} {{end}}' "$name")"
   if [ "$(box 'command -v curl >/dev/null && echo yes')" = yes ]; then
     box 'curl -s -m 3 --unix-socket "${PULSE_SERVER#unix:}" http://x/ >/dev/null 2>&1; [ $? -ne 7 ]'
-    is "$t --sound: the sound server can be connected to" 0 $?
+    is "$t --sound: the front-end can be connected to" 0 $?
+  fi
+  if command -v pactl >/dev/null; then
+    # From the host, through the same socket the box has: what the front-end takes.
+    PULSE_SERVER="unix:$front" pactl info >/dev/null 2>&1
+    is "$t --sound: the sound server answers through the front-end" 0 $?
+    for module in "module-null-sink" "module-pipe-sink file=$tmp/fifo-from-the-box" "module-native-protocol-tcp port=45713 listen=127.0.0.1"; do
+      # shellcheck disable=SC2086
+      has "$t --sound: load-module ${module%% *} is refused" "denied" "$(PULSE_SERVER="unix:$front" pactl load-module $module 2>&1)"
+    done
+    is "$t --sound: ... and nothing was made on the host" "no" "$([ -e "$tmp/fifo-from-the-box" ] && echo yes || echo no)"
+    # the control: the session's own socket does take them, which is why the box doesn't get it
+    if id=$(pactl load-module module-null-sink sink_name=sbx_e2e_control 2>/dev/null); then
+      pactl unload-module "$id" >/dev/null 2>&1
+      ok "$t --sound: (control) the session's own socket accepts load-module"
+    fi
   fi
   has "$t --sound: still no capabilities" "CapEff:	0000000000000000" "$(box 'cat /proc/self/status')"
+  "$SB" stop "$name" >/dev/null 2>&1
+  is "$t --sound: stop stops the front-end" "inactive" "$(systemctl --user is-active "$unit" 2>&1)"
+  is "$t --sound: enter starts it again" "active" "$(box 'true'; systemctl --user is-active "$unit" 2>&1)"
   "$SB" rm "$name" --purge >/dev/null 2>&1
+  is "$t --sound: rm stops it and clears its place" "inactive gone" "$(systemctl --user is-active "$unit" 2>&1) $([ -e "$XDG_RUNTIME_DIR/securebox/$name" ] && echo there || echo gone)"
 fi
 
 if command -v xdg-dbus-proxy >/dev/null && command -v busctl >/dev/null && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
@@ -249,7 +271,7 @@ if command -v xdg-dbus-proxy >/dev/null && command -v busctl >/dev/null && [ -n 
     is "$t --dbus: the filter can be connected to" 0 $?
   fi
   # From the host, through the same socket the box has: what the filter lets through.
-  filter="unix:path=$XDG_RUNTIME_DIR/securebox/$name/bus"
+  filter="unix:path=$XDG_RUNTIME_DIR/securebox/$name/dbus/bus"
   names=$(busctl --address="$filter" list --no-legend 2>/dev/null | awk '{print $1}' | grep -v '^:' | sort | tr '\n' ' ')
   has "$t --dbus: the bus is reachable through the filter" "org.freedesktop.DBus " "$names"
   hasnt "$t --dbus: systemd is not visible through it" "org.freedesktop.systemd1" "$names"
@@ -327,6 +349,23 @@ for c in "$plain" "$imposter"; do
   is "$t $c is still there" "yes" "$(podman container exists "$c" && echo yes || echo no)"
   is "$t ... and so is the directory of that name" "yes" "$([ -d "$SECUREBOX_DATA/$c/home" ] && echo yes || echo no)"
 done
+
+# A box from an image that declares volumes where the session grants go, and carries the
+# label a --dbus box has: created without those grants, it gets none of them.
+t="[hostile image]"
+hostile="localhost/$prefix-hostile"
+podman commit --quiet --change 'LABEL securebox.dbus=org.freedesktop.secrets' --change "VOLUME /run/user/$uid/dbus" --change "VOLUME /run/user/$uid/pulse" "$plain" "$hostile" >/dev/null 2>&1
+volumes=$(podman volume ls --quiet | wc -l)
+name="$prefix-volumes"
+boxes+=("$name")
+"$SB" create "$name" "$hostile" >/dev/null 2>&1
+is "$t create" 0 $?
+is "$t the box is told of no bus and no sound server" "unset" "$(box 'echo "${DBUS_SESSION_BUS_ADDRESS-unset}${PULSE_SERVER+set}${XDG_RUNTIME_DIR+set}"')"
+is "$t no filter was started for it" "inactive" "$(systemctl --user is-active "securebox-dbus-$name" 2>&1)"
+is "$t no sound front-end was started for it" "inactive" "$(systemctl --user is-active "securebox-sound-$name" 2>&1)"
+"$SB" rm "$name" --purge >/dev/null 2>&1
+is "$t rm takes the image's anonymous volumes with the box" "$volumes" "$(podman volume ls --quiet | wc -l)"
+podman image rm "$hostile" >/dev/null 2>&1
 
 # rm --purge without a box deletes only what is a box's directory.
 t="[purge]"
