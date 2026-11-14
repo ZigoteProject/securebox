@@ -273,12 +273,12 @@ let tests =
       assert (match r with
               | Error e -> String.contains $"securebox create dev {snapshot}" e
               | Ok _ -> false))
-    test "export --bin: the command is looked for in the box; the script is written twice, the copy first, and made executable" (fun () ->
+    test "export --bin: the command is looked for in the box; the copy is written, then the script is created anew, executable" (fun () ->
       let (r, calls) = record (answering 0 "") [] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
       assert (r = Ok 0)
       assert (List.item 1 calls = "podman exec dev sh -c command -v \"$1\" >/dev/null 2>&1 sh rg")
       assert (List.skip 2 calls
-              = [ $"mkdir {kept}/bin"; "mkdir /home/ada/.local/bin"; $"write {kept}/bin/rg"; $"write {script}"; $"chmod 755 -- {script}" ]))
+              = [ $"mkdir {kept}/bin"; "mkdir /home/ada/.local/bin"; $"write {kept}/bin/rg"; $"create {script} 493" ]))
     test "export: a stopped box is started, as enter starts it" (fun () ->
       let stopped (args: list<string>) : ProcessResult =
         match args with
@@ -293,15 +293,28 @@ let tests =
     test "export --app: the box's .desktop file is read as the user, and a launcher of securebox's own is written" (fun () ->
       let (r, calls) = record (answering 0 "[Desktop Entry]\nType=Application\nName=App\nExec=app %U\n") [] (fun () -> Commands.export ctx "dev" [ Exports.App "app" ] false)
       assert (r = Ok 0 && String.startsWith "podman exec --env HOME=/home/ada dev sh -c " (List.item 1 calls) && String.endsWith " sh app" (List.item 1 calls))
-      assert (List.skip 4 calls = [ $"write {kept}/applications/securebox+dev+app.desktop"; $"write {launcher}" ])
+      assert (List.skip 4 calls = [ $"write {kept}/applications/securebox+dev+app.desktop"; $"create {launcher} 420" ])
       // a command line of the box's that is not inert words
       let (bad, badCalls) = record (answering 0 "[Desktop Entry]\nType=Application\nExec=sh -c \"id\"\n") [] (fun () -> Commands.export ctx "dev" [ Exports.App "app" ] false)
       assert (Result.isError bad && not (List.exists (String.startsWith "write") badCalls)))
     test "export writes over a file only if it is the one securebox wrote" (fun () ->
       let (r, calls) = record (answering 0 "") [ script ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
-      assert (Result.isError r && not (List.exists (String.startsWith "write") calls))
-      let (again, _) = record (answering 0 "") [ script; kept + "/bin/rg" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
-      assert (again = Ok 0))
+      assert (Result.isError r && not (List.exists (String.startsWith "write") calls) && not (List.exists (String.startsWith "create") calls))
+      // its own file is removed, and created again: never written into
+      let (again, againCalls) = record (answering 0 "") [ script; kept + "/bin/rg" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
+      assert (again = Ok 0 && List.skip 2 againCalls
+              = [ $"cmp --silent -- {kept}/bin/rg {script}"; $"unlink {script}"; $"mkdir {kept}/bin"; "mkdir /home/ada/.local/bin"
+                  $"write {kept}/bin/rg"; $"create {script} 493" ]))
+    test "export does not write through a symbolic link, dangling or not, and does not remove one" (fun () ->
+      let linked = "/home/ada/.local/bin/linked"
+      let touched (calls: list<string>) = List.exists (fun c -> String.startsWith "write" c || String.startsWith "create" c || String.startsWith "unlink" c) calls
+      let (r, calls) = record (answering 0 "") [] (fun () -> Commands.export ctx "dev" [ Exports.Bin "linked" ] false)
+      assert (r = Error $"{linked} is there already, and securebox did not write it or it was changed since: it is left alone" && not (touched calls))
+      // a link to a file that reads as securebox's copy does is still not securebox's file
+      let (same, sameCalls) = record (answering 0 "") [ linked; kept + "/bin/linked" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "linked" ] false)
+      assert (Result.isError same && not (touched sameCalls))
+      let (gone, goneCalls) = record (box "") [ linked; kept + "/bin/linked" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "linked" ] true)
+      assert (Result.isError gone && not (ran $"unlink {linked}" goneCalls)))
     test "export needs something to export, and a path of securebox's that a launcher can be written with" (fun () ->
       let (r, calls) = record (answering 0 "") [] (fun () -> Commands.export ctx "dev" [] false)
       assert (Result.isError r && calls = [])
@@ -309,20 +322,20 @@ let tests =
       assert (Result.isError s && sCalls = []))
     test "export --delete removes what securebox wrote, and leaves what it did not" (fun () ->
       let (r, calls) = record (box "") [ script; kept + "/bin/rg" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] true)
-      assert (r = Ok 0 && calls = [ $"cmp --silent -- {kept}/bin/rg {script}"; $"remove {script}"; $"remove {kept}/bin/rg" ])
+      assert (r = Ok 0 && calls = [ $"cmp --silent -- {kept}/bin/rg {script}"; $"unlink {script}"; $"remove {kept}/bin/rg" ])
       let (other, otherCalls) = record (box "") [ script ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] true)
-      assert (Result.isError other && not (ran $"remove {script}" otherCalls))
+      assert (Result.isError other && not (ran $"unlink {script}" otherCalls))
       // without a name: all of the box's, of both kinds
       let (all, allCalls) = record (box "") [ script; kept + "/bin/rg"; launcher; kept + "/applications/securebox+dev+app.desktop" ] (fun () -> Commands.export ctx "dev" [] true)
-      assert (all = Ok 0 && ran $"remove {script}" allCalls && ran $"remove {launcher}" allCalls))
+      assert (all = Ok 0 && ran $"unlink {script}" allCalls && ran $"unlink {launcher}" allCalls))
     test "rm removes what was exported from the box; rm --purge the image recreate made too" (fun () ->
       let (_, calls) = record (dev "running" []) [ dir; script; kept + "/bin/rg" ] (fun () -> Commands.rm ctx "dev" false)
-      assert (ran $"remove {script}" calls && not (ran "podman image rm" calls))
+      assert (ran $"unlink {script}" calls && not (ran "podman image rm" calls))
       let (_, purged) = record (dev "running" []) [ dir ] (fun () -> Commands.rm ctx "dev" true)
       assert (ran $"podman image rm --ignore {snapshot}" purged)
       // a box removed behind securebox's back leaves nothing on the host either
       let (_, gone) = record (box "") [ script; kept + "/bin/rg" ] (fun () -> Commands.rm ctx "dev" false)
-      assert (ran $"remove {script}" gone))
+      assert (ran $"unlink {script}" gone))
     test "a share is what the path leads to" (fun () ->
       let asked given present = fst (record (box "") present (fun () -> Commands.share ctx given false))
       assert (asked share [ share ] = Ok { path = share; readOnly = false })

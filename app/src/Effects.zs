@@ -20,6 +20,15 @@ effect Host =
   /// Deletes a file, or a directory and what is in it, if it is there.
   abstract removeTree : string -> unit
   abstract writeFile : string * string -> result<unit, string>
+  /// Whether anything is at the path itself: a symbolic link counts, dangling or not.
+  abstract entryExists : string -> bool
+  /// Whether the path is a regular file itself, not a symbolic link to one.
+  abstract isFile : string -> bool
+  /// Creates a file with the text and the permission bits. Fails when anything is at the
+  /// path, and never writes through a symbolic link there.
+  abstract createFile : string * string * int -> result<unit, string>
+  /// Removes the file or the symbolic link at the path itself.
+  abstract removeFile : string -> unit
   abstract copyFile : string * string -> result<unit, string>
   /// The names in a directory; none when it isn't there.
   abstract listDir : string -> list<string>
@@ -67,6 +76,12 @@ let real (app: unit -> 'a) =
     else if Posix.exists path then File.delete path |> ignore
     k ()
   | Host.writeFile (path, text), k -> k (File.writeAllText path text)
+  | Host.entryExists path, k -> k (Posix.entryExists path)
+  | Host.isFile path, k -> k (Posix.isRegularFile path)
+  | Host.createFile (path, text, mode), k -> k (Posix.createFile path text mode)
+  | Host.removeFile path, k ->
+    Posix.removeFile path |> ignore
+    k ()
   | Host.copyFile (source, target), k -> k (File.copy source target)
   | Host.listDir path, k -> k (Result.defaultValue [] (Directory.list path))
   | Host.awaitPath path, k -> k (appears path 60)

@@ -215,24 +215,30 @@ let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<in
 
 /// Where securebox keeps a copy of each file it exported from a box, by kind. It is the
 /// list of what the box has on the host, and what tells that a file there is still the
-/// one securebox wrote: only such a file is replaced or removed.
+/// one securebox wrote: only such a file is replaced or removed. A symbolic link is never
+/// such a file, whatever it leads to: `cmp` would follow it.
 let private keptDir (ctx: Ctx) (name: string) (kind: string) = $"{boxDir ctx name}/exports/{kind}"
 let private places (ctx: Ctx) = [ ("bin", ctx.binDir); ("applications", ctx.appsDir) ]
 let private asWritten (kept: string) (path: string) =
-  Host.pathExists kept && Host.tool ("cmp", [ "--silent"; "--"; kept; path ]) = 0
+  Host.pathExists kept && Host.isFile path && Host.tool ("cmp", [ "--silent"; "--"; kept; path ]) = 0
 
-let private put (ctx: Ctx) (name: string) (kind: string) (dir: string) (file: string) (text: string) (executable: bool) : result<unit, string> =
+/// Puts a file on the host with the permission bits `mode`. It is always created anew:
+/// securebox's own earlier file is removed first, and anything else at the path, a
+/// dangling symbolic link included, is an error and stays as it is.
+let private put (ctx: Ctx) (name: string) (kind: string) (dir: string) (file: string) (text: string) (mode: int) : result<unit, string> =
   let kept = keptDir ctx name kind + "/" + file
   let path = dir + "/" + file
-  if Host.pathExists path && not (asWritten kept path) then
+  let there = Host.entryExists path
+  if there && not (asWritten kept path) then
     Error $"{path} is there already, and securebox did not write it or it was changed since: it is left alone"
   else
+    if there then Host.removeFile path
     let made =
       [ Host.ensureDir (keptDir ctx name kind); Host.ensureDir dir
-        Host.writeFile (kept, text); Host.writeFile (path, text) ]
+        Host.writeFile (kept, text); Host.createFile (path, text, mode) ]
     match List.tryFind Result.isError made with
     | Some (Error e) -> Error $"cannot export: {e}"
-    | _ -> if executable && Host.tool ("chmod", [ "755"; "--"; path ]) <> 0 then Error $"cannot make {path} executable" else Ok ()
+    | _ -> Ok ()
 
 /// Removes an exported file from the host if it is still as securebox wrote it; whether
 /// it was.
@@ -240,7 +246,7 @@ let private take (ctx: Ctx) (name: string) (kind: string) (dir: string) (file: s
   let kept = keptDir ctx name kind + "/" + file
   let path = dir + "/" + file
   let mine = asWritten kept path
-  if mine then Host.removeTree path
+  if mine then Host.removeFile path
   Host.removeTree kept
   mine
 
@@ -254,7 +260,7 @@ let private exportOne (ctx: Ctx) (name: string) (item: Exports.Item) : result<un
     match Host.capture (hasCommandArgs name command) with
     | Ok r when r.code = 0 ->
       let file = Exports.scriptName command
-      let _ = (put ctx name "bin" ctx.binDir file (Exports.script ctx.self name command) true)?
+      let _ = (put ctx name "bin" ctx.binDir file (Exports.script ctx.self name command) 493)?
       Host.say $"{ctx.binDir}/{file} runs {command} in the box '{name}'"
       Ok ()
     | _ -> Error $"the box '{name}' has no command '{command}'"
@@ -263,7 +269,7 @@ let private exportOne (ctx: Ctx) (name: string) (item: Exports.Item) : result<un
     | Ok r when r.code = 0 ->
       let made = (Exports.launcher id r.output)?
       let file = Exports.launcherName name id
-      let _ = (put ctx name "applications" ctx.appsDir file (Exports.desktopFile ctx.self name made) false)?
+      let _ = (put ctx name "applications" ctx.appsDir file (Exports.desktopFile ctx.self name made) 420)?
       Host.say $"'{made.title} (on {name})' is in your desktop's menu: {ctx.appsDir}/{file}"
       Ok ()
     | _ -> Error $"the box '{name}' has no application '{id}': no {id}.desktop in its /usr/share/applications, /usr/local/share/applications or ~/.local/share/applications"

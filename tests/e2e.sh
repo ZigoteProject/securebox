@@ -503,6 +503,25 @@ is "$t export --delete removes the script" "0 gone" "$? $([ -e "$script" ] && ec
 echo "# mine now" >>"$script"
 "$SB" export "$name" --bin "$cmd" >/dev/null 2>&1
 is "$t a file that was changed since is not written over" "125 # mine now" "$? $(tail -1 "$script")"
+# A link where a script would go, to a file that is not there: nothing is written through it.
+inbox "/usr/local/bin/$cmd-linked" <<'END'
+#!/bin/sh
+END
+ln -s "$tmp/through-a-link" "$bin/$cmd-linked"
+"$SB" export "$name" --bin "$cmd-linked" >/dev/null 2>&1
+is "$t a dangling link is not written through" "125 absent link" "$? $([ -e "$tmp/through-a-link" ] && echo there || echo absent) $([ -L "$bin/$cmd-linked" ] && echo link || echo replaced)"
+# ... nor is a link to a copy of what securebox would write taken for its own file.
+rm -f "$bin/$cmd-linked"
+"$SB" export "$name" --bin "$cmd-linked" >/dev/null 2>&1
+is "$t the script is created with the mode of a command" "755" "$(stat -c %a "$bin/$cmd-linked" 2>&1)"
+cp "$bin/$cmd-linked" "$tmp/same-text"
+rm -f "$bin/$cmd-linked"
+ln -s "$tmp/same-text" "$bin/$cmd-linked"
+"$SB" export "$name" --bin "$cmd-linked" >/dev/null 2>&1
+is "$t a link to the same text is not written over" "125 link" "$? $([ -L "$bin/$cmd-linked" ] && echo link || echo replaced)"
+"$SB" export "$name" --delete --bin "$cmd-linked" >/dev/null 2>&1
+is "$t ... and not removed" "125 link" "$? $([ -L "$bin/$cmd-linked" ] && echo link || echo replaced)"
+rm -f "$bin/$cmd-linked"
 "$SB" recreate "$name" >/dev/null 2>&1
 is "$t recreate keeps what was exported" "there" "$([ -e "$launcher" ] && echo there || echo gone)"
 "$SB" rm "$name" --purge >/dev/null 2>&1

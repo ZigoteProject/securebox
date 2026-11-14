@@ -57,3 +57,23 @@ extern posix_is_socket : cstr -> i32
 
 /// Whether the path is a socket.
 let isSocket (path: string) = posix_is_socket path = i32 1
+
+extern posix_entry : cstr -> i32
+extern posix_create_file : cstr -> span<u8> -> u32 -> i32
+extern unlink : cstr -> i32
+
+/// Whether anything is at the path itself: a symbolic link counts, dangling or not.
+let entryExists (path: string) = posix_entry path <> i32 0
+
+/// Whether the path is a regular file itself, not a symbolic link to one.
+let isRegularFile (path: string) = posix_entry path = i32 1
+
+/// Creates a file with `text` in it and the permission bits `mode` (420 is 0644, 493 is
+/// 0755). Fails when anything is at the path already, and never writes through a symbolic
+/// link there, dangling or not.
+let createFile (path: string) (text: string) (mode: int) : result<unit, string> =
+  let e = posix_create_file path (String.bytes text) (u32 mode)
+  if e = i32 0 then Ok () else Error $"cannot create {path}: {String.ofCStr (strerror e)}"
+
+/// Removes the file or the symbolic link at the path itself. Whether it worked.
+let removeFile (path: string) = unlink path = i32 0

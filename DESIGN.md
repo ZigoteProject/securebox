@@ -312,7 +312,11 @@ its shares, and a launcher is a file the desktop reads and may hand to a shell.
   characters, or `export` refuses.
 - **Ownership is by content.** A copy of every exported file is kept in
   `DATA/NAME/exports/{bin,applications}/`. A host file is replaced or removed only when
-  `cmp` says it is identical to its copy; one the user wrote or edited is left alone. The
+  it is a regular file that `cmp` says is identical to its copy; one the user wrote or
+  edited is left alone, and so is a symbolic link, whatever it leads to. A file is never
+  written into: securebox's own earlier one is unlinked, and the new one is created with
+  `O_CREAT | O_EXCL | O_NOFOLLOW`, which fails on anything at the path, a dangling link
+  included. The
   directory is also the list of a box's exports, which `export --delete` and `rm` walk.
   A box cannot reach it: only `DATA/NAME/home` is mounted.
 - A launcher is named `securebox+NAME+APP.desktop`. No box name has a `+`, so two boxes
@@ -842,8 +846,6 @@ that cannot work. The first version of the script had no such control and could 
     host's paths would not exist in the box anyway).
 13. **A launcher has securebox's path in it.** Move the binary, and exports must be made
     again.
-14. **`export` writes through a dangling symbolic link** at the place it writes to: the
-    existence check follows links.
 
 ## Appendix A: what was verified, and how
 

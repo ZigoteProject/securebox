@@ -269,7 +269,7 @@ host and pulls the images that aren't local.
 app/               the securebox binary: Cli, Box (validation), Podman (argument lists),
                    Exports (launchers), Effects (the outside world), Commands, main
 packages/argz/     an Argu-style argument parser for Z#: a union is the command line
-packages/posix/    exec, realpath, user ids, isatty, chmod: all of the project's C (60 lines)
+packages/posix/    exec, realpath, user ids, isatty, chmod, exclusive file creation: all of the project's C (100 lines)
 tests/e2e.sh       the end-to-end tests
 DESIGN.md          the design: threat model, the podman command lines, what was verified
 ```

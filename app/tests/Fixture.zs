@@ -15,7 +15,9 @@ let ctx : Ctx =
     appsDir = "/home/ada/.local/share/applications" }
 
 /// Symbolic links of the recorded host: where each leads.
-let links = [ ("/srv/to-ssh", "/var/home/ada/.ssh"); ("/srv/to-web", "/home/ada/Projects/web") ]
+let links =
+  [ ("/srv/to-ssh", "/var/home/ada/.ssh"); ("/srv/to-web", "/home/ada/Projects/web")
+    ("/home/ada/.local/bin/linked", "/home/ada/not-there") ]
 
 /// Runs `app` with podman answered by `answer` (from its arguments) and the paths in
 /// `present` existing: the result, and what was asked of the host, in order. A box's
@@ -49,6 +51,14 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
     | Host.writeFile (path, _), k ->
       calls <- ("write " + path) :: calls
       k (Ok ())
+    | Host.entryExists path, k -> k (List.contains path present || List.exists (fun (link, _) -> link = path) links)
+    | Host.isFile path, k -> k (List.contains path present && not (List.exists (fun (link, _) -> link = path) links))
+    | Host.createFile (path, _, mode), k ->
+      calls <- ($"create {path} {mode}") :: calls
+      k (Ok ())
+    | Host.removeFile path, k ->
+      calls <- ("unlink " + path) :: calls
+      k ()
     | Host.copyFile (source, target), k ->
       calls <- ($"copy {source} {target}") :: calls
       k (Ok ())

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `export` no longer writes through a symbolic link where a script or a launcher goes. A
+  file is created anew (`O_EXCL`, `O_NOFOLLOW`), anything else at the path is left alone
+  and reported, and a link is never taken for a file securebox wrote, by `export`,
+  `export --delete` or `rm`.
+
 ## 0.2.0 (2026-11-14)
 
 - `securebox recreate NAME [grants]`: the box again, with the grants given now and what

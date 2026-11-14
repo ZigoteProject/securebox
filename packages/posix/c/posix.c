@@ -1,5 +1,7 @@
-// The C side of the posix package: execvp over a packed argv, realpath, and the passwd entry.
+// The C side of the posix package: execvp over a packed argv, realpath, the passwd entry,
+// and files created and removed without following a symbolic link.
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pwd.h>
 #include <signal.h>
@@ -65,4 +67,36 @@ const char *posix_user_home(void) {
 int32_t posix_is_socket(const char *path) {
   struct stat st;
   return stat(path, &st) == 0 && S_ISSOCK(st.st_mode);
+}
+
+// What is at the path itself, a symbolic link not followed: 0 nothing, 1 a regular file,
+// 2 anything else (a link, dangling or not, a directory, a socket).
+int32_t posix_entry(const char *path) {
+  struct stat st;
+  if (lstat(path, &st) != 0) return 0;
+  return S_ISREG(st.st_mode) ? 1 : 2;
+}
+
+// Creates the file with buf[0..len) in it and exactly these permission bits. Fails with
+// EEXIST when anything is at the path: O_EXCL does not follow a link there, dangling or
+// not. Returns 0, or errno with nothing left at the path.
+int32_t posix_create_file(const char *path, const uint8_t *buf, size_t len, uint32_t mode) {
+  int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, (mode_t)mode);
+  if (fd < 0) return errno;
+  int32_t e = 0;
+  size_t off = 0;
+  while (off < len) {
+    ssize_t n = write(fd, buf + off, len - off);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      e = errno;
+      break;
+    }
+    off += (size_t)n;
+  }
+  // the bits asked for, whatever the umask took at open
+  if (e == 0 && fchmod(fd, (mode_t)mode) != 0) e = errno;
+  if (close(fd) != 0 && e == 0) e = errno;
+  if (e != 0) unlink(path);
+  return e;
 }
