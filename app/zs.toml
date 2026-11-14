@@ -1,0 +1,7 @@
+[package]
+name = "securebox"
+version = "0.1.0"
+
+[dependencies]
+argz = { path = "../packages/argz" }
+posix = { path = "../packages/posix" }

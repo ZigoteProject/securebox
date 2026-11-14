@@ -1,0 +1,4 @@
+[package]
+name = "argz"
+version = "0.1.0"
+main = "src/Argz.zs"
