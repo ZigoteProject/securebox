@@ -21,6 +21,8 @@ effect Host =
   abstract removeTree : string -> unit
   abstract writeFile : string * string -> result<unit, string>
   abstract copyFile : string * string -> result<unit, string>
+  /// The names in a directory; none when it isn't there.
+  abstract listDir : string -> list<string>
   /// Waits a moment for a path to appear; whether it did.
   abstract awaitPath : string -> bool
   /// A line for the user.
@@ -66,6 +68,7 @@ let real (app: unit -> 'a) =
     k ()
   | Host.writeFile (path, text), k -> k (File.writeAllText path text)
   | Host.copyFile (source, target), k -> k (File.copy source target)
+  | Host.listDir path, k -> k (Result.defaultValue [] (Directory.list path))
   | Host.awaitPath path, k -> k (appears path 60)
   | Host.say line, k ->
     eprintln line

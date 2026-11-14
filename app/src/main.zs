@@ -34,6 +34,11 @@ let private context () : result<Ctx, string> =
   let resolved = Posix.realPath dataDir
   let _ = (Result.mapError (fun e -> $"the data directory: {e}") (if resolved = "" then Ok dataDir else Box.dataPath homes resolved))?
   let runtime = env "XDG_RUNTIME_DIR"
+  let exe = Posix.realPath "/proc/self/exe"
+  let apps =
+    match Environment.getVariable "XDG_DATA_HOME" with
+    | Some d when Path.isAbsolute d -> Path.getFullPath d + "/applications"
+    | _ -> home + "/.local/share/applications"
   let shell = Path.getFileName (env "SHELL")
   let plain c = Char.isLetterOrDigit c || c = '-' || c = '_'
   Ok { user = user; uid = Posix.userId (); gid = Posix.groupId (); home = home; homes = homes
@@ -44,7 +49,10 @@ let private context () : result<Ctx, string> =
        cwd = Environment.currentDirectory ()
        shell = if shell <> "" && List.forall plain (String.chars shell) then shell else "sh"
        tty = Posix.isTerminal 0 && Posix.isTerminal 1
-       passEnv = List.filter (fun v -> Option.isSome (Environment.getVariable v)) [ "TERM"; "COLORTERM"; "LANG"; "LC_ALL" ] }
+       passEnv = List.filter (fun v -> Option.isSome (Environment.getVariable v)) [ "TERM"; "COLORTERM"; "LANG"; "LC_ALL" ]
+       self = (if Exports.inertPath exe then exe else "")
+       binDir = home + "/.local/bin"
+       appsDir = apps }
 
 /// The GPU's render nodes: what computing and rendering need, without the display's own.
 let private renderDevices () : result<list<string>, string> =
@@ -95,6 +103,31 @@ let rec private createSpec (ctx: Ctx) (spec: CreateSpec) (args: list<Cli.Create.
     let name = (Box.busName n)?
     createSpec ctx { spec with dbus = List.append spec.dbus [ name ] } rest
 
+/// The variables `enter -e` sets. One given by name alone must be set here: podman takes
+/// its value from the environment.
+let rec private enterEnv (args: list<Cli.Enter.Arg>) : result<list<string>, string> =
+  match args with
+  | [] -> Ok []
+  | Cli.Enter.Env given :: rest ->
+    let checked = (Box.envVar given)?
+    let _ = (if String.contains "=" checked || Option.isSome (Environment.getVariable checked) then Ok () else Error $"-e {checked}: {checked} is not set here")?
+    let more = (enterEnv rest)?
+    Ok (checked :: more)
+  | _ :: rest -> enterEnv rest
+
+let rec private exportItems (args: list<Cli.Export.Arg>) : result<list<Exports.Item>, string> =
+  match args with
+  | [] -> Ok []
+  | Cli.Export.Bin given :: rest ->
+    let program = (Exports.program given)?
+    let more = (exportItems rest)?
+    Ok (Exports.Bin program :: more)
+  | Cli.Export.App given :: rest ->
+    let application = (Exports.application given)?
+    let more = (exportItems rest)?
+    Ok (Exports.App application :: more)
+  | _ :: rest -> exportItems rest
+
 /// The box a command names, checked.
 let private named (command: string) (names: list<string>) : result<string, string> =
   match names with
@@ -119,7 +152,8 @@ let private run (cmd: Cli.Command) : result<int, string> =
     let cmd = List.collect (fun a -> match a with
                                      | Cli.Enter.Cmd c -> c
                                      | _ -> []) args
-    Commands.enter ctx name (List.contains Cli.Enter.Root args) cmd
+    let vars = (enterEnv args)?
+    Commands.enter { ctx with passEnv = List.append ctx.passEnv vars } name (List.contains Cli.Enter.Root args) cmd
   | Cli.Stop args ->
     let ctx = (context ())?
     let name = (named "stop" (List.map (fun (Cli.Stop.Name n) -> n) args))?
@@ -130,6 +164,21 @@ let private run (cmd: Cli.Command) : result<int, string> =
                                                    | Cli.Rm.Name n -> Some n
                                                    | _ -> None) args))?
     Commands.rm ctx name (List.contains Cli.Rm.Purge args)
+  | Cli.Recreate args ->
+    let ctx = (context ())?
+    let name = (named "recreate" (List.choose (fun a -> match a with
+                                                         | Cli.Recreate.Name n -> Some n
+                                                         | _ -> None) args))?
+    // the image is the box's own files: `recreate` names it
+    let spec = (createSpec ctx { name = name; image = "" } (List.map Cli.Recreate.asCreate args))?
+    Commands.recreate ctx spec
+  | Cli.Export args ->
+    let ctx = (context ())?
+    let name = (named "export" (List.choose (fun a -> match a with
+                                                       | Cli.Export.Name n -> Some n
+                                                       | _ -> None) args))?
+    let items = (exportItems args)?
+    Commands.export ctx name items (List.contains Cli.Export.Delete args)
 
 let main () =
   let args = Environment.args ()

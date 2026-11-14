@@ -150,12 +150,17 @@ let private unchanged (ctx: Ctx) (path: string) : result<unit, string> =
   if now = path && Result.isOk (sharePath ctx path) then Ok ()
   else Error $"the shared directory '{path}' is not what it was when the box was created (it is now '{now}'): the box is not started. Remove the box and create it again"
 
-let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
+/// What is wrong with a set of grants whatever the host has: checked before anything is
+/// touched.
+let private coherent (spec: CreateSpec) : result<unit, string> =
   let session = Option.isSome spec.wayland || spec.sound || spec.dbus <> []
   let _ = (together spec.shares)?
   // with labelling off for a session grant, the host's network namespace would also put
   // the session's abstract sockets (X11's, for one) in the box's reach
-  let _ = (if session && spec.network = HostNetwork then Error "--network host cannot be combined with --wayland, --sound or --dbus" else Ok ())?
+  if session && spec.network = HostNetwork then Error "--network host cannot be combined with --wayland, --sound or --dbus" else Ok ()
+
+let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
+  let _ = (coherent spec)?
   // the name must be free before anything is started under it
   let found = (look ctx spec.name)?
   match found with
@@ -180,12 +185,15 @@ let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
       unserve ctx spec.name (spec.dbus <> []) spec.sound true
       Error e
     | Ok () ->
+      // what it was made with, for whoever makes it again once the container is gone
+      Host.writeFile (boxDir ctx spec.name + "/created", createLine spec + "\n") |> ignore
       Host.say (if kept then $"created the box '{spec.name}', with the home directory an earlier box of that name left"
                 else $"created the box '{spec.name}'")
       Host.say $"enter it with: securebox enter {spec.name}"
       Ok 0
 
-let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<int, string> =
+/// The box, running: started if it was stopped, with what its grants need from the session.
+let private ready (ctx: Ctx) (name: string) : result<BoxState, string> =
   let state = (find ctx name)?
   // what the session must have for the box's grants: the filter and the front-end always,
   // the compositor's socket to start it
@@ -199,7 +207,96 @@ let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<in
     | (_, (what, path) :: _) -> Error $"the box '{name}' was created with {what}, and {path} is not there: start it from your graphical session"
     | _ -> if state.running then Ok "" else podman (startArgs name) $"the box '{name}' did not start"
   let _ = started?
+  Ok state
+
+let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<int, string> =
+  let state = (ready ctx name)?
   Ok (Host.exec (execArgs ctx name root (sessionEnv ctx state) (workdir ctx (shares ctx state)) cmd))
+
+/// Where securebox keeps a copy of each file it exported from a box, by kind. It is the
+/// list of what the box has on the host, and what tells that a file there is still the
+/// one securebox wrote: only such a file is replaced or removed.
+let private keptDir (ctx: Ctx) (name: string) (kind: string) = $"{boxDir ctx name}/exports/{kind}"
+let private places (ctx: Ctx) = [ ("bin", ctx.binDir); ("applications", ctx.appsDir) ]
+let private asWritten (kept: string) (path: string) =
+  Host.pathExists kept && Host.tool ("cmp", [ "--silent"; "--"; kept; path ]) = 0
+
+let private put (ctx: Ctx) (name: string) (kind: string) (dir: string) (file: string) (text: string) (executable: bool) : result<unit, string> =
+  let kept = keptDir ctx name kind + "/" + file
+  let path = dir + "/" + file
+  if Host.pathExists path && not (asWritten kept path) then
+    Error $"{path} is there already, and securebox did not write it or it was changed since: it is left alone"
+  else
+    let made =
+      [ Host.ensureDir (keptDir ctx name kind); Host.ensureDir dir
+        Host.writeFile (kept, text); Host.writeFile (path, text) ]
+    match List.tryFind Result.isError made with
+    | Some (Error e) -> Error $"cannot export: {e}"
+    | _ -> if executable && Host.tool ("chmod", [ "755"; "--"; path ]) <> 0 then Error $"cannot make {path} executable" else Ok ()
+
+/// Removes an exported file from the host if it is still as securebox wrote it; whether
+/// it was.
+let private take (ctx: Ctx) (name: string) (kind: string) (dir: string) (file: string) : bool =
+  let kept = keptDir ctx name kind + "/" + file
+  let path = dir + "/" + file
+  let mine = asWritten kept path
+  if mine then Host.removeTree path
+  Host.removeTree kept
+  mine
+
+/// Removes everything exported from a box.
+let private unexport (ctx: Ctx) (name: string) =
+  List.iter (fun (kind, dir) -> List.iter (fun file -> take ctx name kind dir file |> ignore) (Host.listDir (keptDir ctx name kind))) (places ctx)
+
+let private exportOne (ctx: Ctx) (name: string) (item: Exports.Item) : result<unit, string> =
+  match item with
+  | Exports.Bin command ->
+    match Host.capture (hasCommandArgs name command) with
+    | Ok r when r.code = 0 ->
+      let file = Exports.scriptName command
+      let _ = (put ctx name "bin" ctx.binDir file (Exports.script ctx.self name command) true)?
+      Host.say $"{ctx.binDir}/{file} runs {command} in the box '{name}'"
+      Ok ()
+    | _ -> Error $"the box '{name}' has no command '{command}'"
+  | Exports.App id ->
+    match Host.capture (desktopFileArgs ctx name id) with
+    | Ok r when r.code = 0 ->
+      let made = (Exports.launcher id r.output)?
+      let file = Exports.launcherName name id
+      let _ = (put ctx name "applications" ctx.appsDir file (Exports.desktopFile ctx.self name made) false)?
+      Host.say $"'{made.title} (on {name})' is in your desktop's menu: {ctx.appsDir}/{file}"
+      Ok ()
+    | _ -> Error $"the box '{name}' has no application '{id}': no {id}.desktop in its /usr/share/applications, /usr/local/share/applications or ~/.local/share/applications"
+
+let private removeOne (ctx: Ctx) (name: string) (item: Exports.Item) : result<unit, string> =
+  let (kind, dir, file) =
+    match item with
+    | Exports.Bin command -> ("bin", ctx.binDir, Exports.scriptName command)
+    | Exports.App id -> ("applications", ctx.appsDir, Exports.launcherName name id)
+  if take ctx name kind dir file then Ok ()
+  else Error $"{dir}/{file} was not exported from the box '{name}', or was changed since: it is left alone"
+
+let rec private each (f: Exports.Item -> result<unit, string>) (items: list<Exports.Item>) : result<int, string> =
+  match items with
+  | [] -> Ok 0
+  | item :: rest ->
+    let _ = (f item)?
+    each f rest
+
+/// Puts commands and applications of a box on the host, as a script and a launcher that
+/// enter the box; with `delete`, removes them, or all of the box's when none is named.
+let export (ctx: Ctx) (name: string) (items: list<Exports.Item>) (delete: bool) : result<int, string> =
+  if delete then
+    if items = [] then
+      unexport ctx name
+      Host.say $"removed what was exported from the box '{name}'"
+      Ok 0
+    else each (removeOne ctx name) items
+  else if items = [] then Error "export needs --bin or --app (see securebox export --help)"
+  else if ctx.self = "" then Error "securebox is at a path that cannot be written into a launcher (a space in it, or another character with a meaning to a shell): move it"
+  else
+    let _ = (ready ctx name)?
+    each (exportOne ctx name) items
 
 let list (uid: int) : result<int, string> =
   let boxes = (podman listArgs "podman could not list the boxes")?
@@ -217,6 +314,8 @@ let stop (ctx: Ctx) (name: string) : result<int, string> =
   Result.map (fun _ -> 0) stopped
 
 let private purged (ctx: Ctx) (name: string) (failure: string) : result<int, string> =
+  // the image `recreate` kept the box's files in goes too, if there is one
+  Host.capture (snapshotRmArgs name) |> ignore
   match podman (purgeArgs ctx name) failure with
   | Error e -> Error e
   | Ok _ ->
@@ -231,6 +330,7 @@ let rm (ctx: Ctx) (name: string) (purge: bool) : result<int, string> =
   | Ok Missing ->
     // the container is gone already (removed with podman, say): nothing stays running
     // under its name, and what it left can still be purged, when it is a box's
+    unexport ctx name
     if ctx.runtime <> "" && Host.pathExists (hostBoxDir ctx name) then unserve ctx name true true true
     if purge && Host.dirExists (boxHome ctx name) then purged ctx name $"could not delete {dir}" else Error (missing name)
   | Ok (Ours state) ->
@@ -238,8 +338,26 @@ let rm (ctx: Ctx) (name: string) (purge: bool) : result<int, string> =
     | Error e -> Error e
     | Ok _ ->
       unserve ctx name (hasBus ctx state) (hasSound ctx state) true
+      unexport ctx name
       if purge then purged ctx name $"the box is removed, but {dir} could not be deleted"
       else
         if Host.dirExists dir then
-          Host.say $"removed the box '{name}'; its home directory is kept in {dir} (rm --purge deletes it)"
+          Host.say $"removed the box '{name}'; its home directory is kept in {dir}, with the command that created it in {dir}/created (rm --purge deletes both)"
         Ok 0
+
+/// The box again, from its own files and with the grants now given: it is stopped, kept as
+/// an image, removed, and created from that image. What was installed in it stays, and so
+/// do its home directory and what was exported from it; its grants are `spec`'s alone.
+let recreate (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
+  let name = spec.name
+  let image = snapshotImage name
+  let _ = (coherent spec)?
+  let state = (find ctx name)?
+  let _ = (if state.running then podman (stopArgs name) $"the box '{name}' did not stop" else Ok "")?
+  // ponytail: each recreate adds a layer to the image; commit with --squash if a box is
+  // ever recreated by the hundred
+  let _ = (podman (commitArgs name) $"the files of the box '{name}' could not be kept as an image: the box is as it was, stopped")?
+  let _ = (podman (rmArgs name) $"the box '{name}' was not removed")?
+  unserve ctx name (hasBus ctx state) (hasSound ctx state) true
+  let lost = $"The box '{name}' was removed before that. What was installed in it is in the image {image}, and its home directory is kept: 'securebox create {name} {image}' with its grants makes it again"
+  Result.mapError (fun e -> e + "\n" + lost) (create ctx { spec with image = image })

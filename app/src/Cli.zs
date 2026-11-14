@@ -3,7 +3,7 @@
 open Argz
 
 /// The release this is; app/zs.toml says the same (tests/e2e.sh checks that it does).
-let version = "0.1.1"
+let version = "0.2.0"
 
 module Create =
   [<Derive(Arg)>]
@@ -32,18 +32,66 @@ module Create =
     | Sound -> { help = "let programs play and record sound (PulseAudio socket); SELinux confinement off, as for --wayland" }
     | Dbus _ -> { help = "let the box talk to this session-bus name, through a filter (repeatable); SELinux confinement off" }
 
+module Recreate =
+  [<Derive(Arg)>]
+  type Arg =
+    | Name of string
+    | Share of string
+    | ShareRo of string
+    | Network of string
+    | Publish of string
+    | Gpu
+    | Wayland
+    | Sound
+    | Dbus of string
+
+  /// The grants are `create`'s, and so is what is said about them.
+  let asCreate a =
+    match a with
+    | Name n -> Create.Name n
+    | Share p -> Create.Share p
+    | ShareRo p -> Create.ShareRo p
+    | Network n -> Create.Network n
+    | Publish p -> Create.Publish p
+    | Gpu -> Create.Gpu
+    | Wayland -> Create.Wayland
+    | Sound -> Create.Sound
+    | Dbus n -> Create.Dbus n
+
+  let spec a =
+    match a with
+    | Name _ -> { help = "name of the box"; kind = Positional }
+    | _ -> Create.spec (asCreate a)
+
 module Enter =
   [<Derive(Arg)>]
   type Arg =
     | Name of string
     | Root
+    | Env of string
     | Cmd of list<string>
 
   let spec a =
     match a with
     | Name _ -> { help = "name of the box"; kind = Positional }
     | Root -> { help = "enter as root, to install packages" }
+    | Env _ -> { help = "set a variable in the box: NAME=VALUE, or NAME for the value it has here (repeatable)"; short = Some 'e' }
     | Cmd _ -> { help = "command to run instead of a shell (after --)"; kind = Positional }
+
+module Export =
+  [<Derive(Arg)>]
+  type Arg =
+    | Name of string
+    | Bin of string
+    | App of string
+    | Delete
+
+  let spec a =
+    match a with
+    | Name _ -> { help = "name of the box"; kind = Positional }
+    | Bin _ -> { help = "a command of the box's, by name or path: a script in ~/.local/bin runs it in the box (repeatable)" }
+    | App _ -> { help = "an application of the box's, by the name of its .desktop file: a launcher in your desktop's menu (repeatable)" }
+    | Delete -> { help = "remove what was exported: the ones named, or all of the box's" }
 
 module Stop =
   [<Derive(Arg)>]
@@ -72,6 +120,8 @@ type Command =
   | List
   | Stop of list<Stop.Arg>
   | Rm of list<Rm.Arg>
+  | Recreate of list<Recreate.Arg>
+  | Export of list<Export.Arg>
   | Version
 
 let spec a =
@@ -81,4 +131,6 @@ let spec a =
   | List -> { help = "list the boxes"; kind = Command }
   | Stop _ -> Argz.command "stop a box" Stop.spec
   | Rm _ -> Argz.command "remove a box; its home directory is kept" Rm.spec
+  | Recreate _ -> Argz.command "make a box again with other grants; what was installed in it is kept" Recreate.spec
+  | Export _ -> Argz.command "put a box's commands and applications on the host, as launchers" Export.spec
   | Version -> { help = "show the version" }

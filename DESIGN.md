@@ -1,10 +1,11 @@
 # securebox — design
 
-Status: 2026-11-14, released as 0.1.1. Implemented: the five commands and the `--share`,
-`--share-ro`, `--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants,
-with 158 unit tests and an end-to-end script of 254 checks against real podman. The code has
-had a correctness review and two independent security reviews; appendix D lists what they
-found and what was done.
+Status: 2026-11-14, released as 0.2.0. Implemented: the seven commands and the
+`--share`, `--share-ro`, `--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and
+`--dbus` grants, with 220 unit tests and an end-to-end script of 312 checks against real
+podman. The code has had a correctness review and two independent security reviews;
+appendix D lists what they found and what was done. `recreate` and `export` were added
+after them and have not been reviewed independently.
 
 securebox gives you a persistent, interactive Linux box from any container image, the way
 distrobox does, but the box cannot see your home directory or your session unless you share
@@ -19,6 +20,8 @@ securebox enter web --root -- apt install -y nodejs
 securebox create api --publish 8080:8080 --gpu
 securebox create gui --wayland --sound    # GUI programs with sound; costs that box its SELinux confinement
 securebox create app --dbus org.freedesktop.Notifications   # one name on the session bus, filtered
+securebox recreate web --share ~/Projects/web --network none   # other grants; what was installed stays
+securebox export web --bin node --app org.example.Editor       # a script and a menu entry on the host
 securebox list
 securebox stop web
 securebox rm web                          # keeps the box's home; --purge deletes it too
@@ -31,7 +34,8 @@ Goals:
 - **As easy as distrobox.** `create`, `enter`, done. No config file, no daemon, no setup step.
 - **Secure by default.** A new box gets nothing from the host: no home, no session sockets,
   no devices, no host network namespace. Every grant is an explicit flag at `create`.
-- **Minimal.** Five commands. The tool only builds podman command lines; podman holds all state.
+- **Minimal.** Seven commands. The tool only builds podman command lines; podman holds the
+  state of the boxes.
 - **Fast.** Entering a running box costs two podman invocations and nothing else.
 - **Single static binary**, rootless only.
 
@@ -41,16 +45,16 @@ Non-goals for v1:
 - Rootful boxes. securebox refuses to run as root. The request was "rootless by default";
   a rootful mode is deferred until someone needs it, because every default below would have
   to be re-argued for it.
-- Exporting apps to the host desktop, `assemble`-style manifests, `upgrade`, `host-exec`.
-  `securebox enter NAME -- cmd` is the primitive; a two-line wrapper script covers export.
+- `assemble`-style manifests, `upgrade`, `host-exec`. (Exporting was a non-goal until
+  someone asked for it; section 3 has what it became.)
 - An escape hatch for arbitrary podman flags. It would void every guarantee in section 3;
   anyone who needs one can call podman directly.
 - X11. An X11 socket lets the box log keystrokes and read other windows.
 - An ssh-agent grant. Like Wayland it means a session socket, with the cost section 3
   describes, and unlike Wayland nobody has asked for it.
 - The whole session bus, PipeWire's own socket, and portals. Section 3 says why.
-- Changing a box's grants after creation. Podman fixes mounts at create time; recreate the
-  box (its home survives, packages installed into the image layer do not).
+- Changing the grants of a container. Podman fixes mounts at create time, so `recreate`
+  makes a new container from the old one's files (section 3).
 
 ## 2. How it differs from distrobox
 
@@ -248,6 +252,78 @@ notification server's answer, and is refused systemd.
 The GPU needs no such trade because policy allows it (`container_use_dri_devices` is on by
 default).
 
+### Changing grants: `recreate`
+
+The question it answers: can a box have the network while it is set up, and not after?
+Podman cannot change a container's network or mounts, so the box is made again: stopped,
+committed to an image, removed, and created from that image with the grants now given.
+
+- **The grants are restated, not carried over.** `recreate NAME` with no flags gives a box
+  with no grants. Reading the old grants back from `inspect` would have been the
+  convenient design, and it is the one both reviews found holes in (a grant recognised by
+  where something is mounted; a label an image can carry). What the user types is the only
+  source of a grant, and forgetting one fails safe.
+- **Nothing is touched until the request is known to be coherent**, and the box is removed
+  only after its files are in the image. If the new box then cannot be made, the error
+  names the image and the `create` that brings the box back. The home directory is not
+  involved at all: it is a bind mount, kept as `rm` keeps it.
+- **The image carries what the container had**: its labels (`securebox=1`, and
+  `securebox.dbus` if it had one), its entrypoint and user. `create` states every one of
+  those again, and a box's D-Bus names are read only where securebox's own directory is
+  bound, so a recreated box without `--dbus` has no filter (the end-to-end script's
+  hostile-image checks cover the same path).
+- The image is `localhost/securebox-snapshot:NAME`: the box's name as the *tag*, because a
+  repository name cannot spell every box name (`a..b`). `rm` keeps it, like the home;
+  `rm --purge` removes it.
+- Not carried over: anonymous volumes an image declared. They are not part of a
+  container's files, and `rm --volumes` deletes them with the old container.
+
+### Launchers on the host: `export`
+
+A box's command or application, startable from the host: `--bin` writes a script into
+`~/.local/bin`, `--app` a `.desktop` file into the XDG applications directory. Both run
+`securebox enter NAME -- …`, so what runs has the box's grants and no more. The new thing
+is the direction: until here nothing of a box's ever became a file outside its home and
+its shares, and a launcher is a file the desktop reads and may hand to a shell.
+
+- **A launcher is written, never copied.** A box's `.desktop` file is read as the user
+  (`head -c 65536`, so the box cannot make securebox read without end), and securebox
+  writes a file of its own with seven keys: `Type`, `Name`, `Exec`, `Icon`, `Terminal`,
+  `Categories`, `StartupWMClass`. Only `[Desktop Entry]` is read, and of a key its first
+  line. `Actions`, `MimeType`, `DBusActivatable`, `TryExec`, `Path` and everything else
+  stay behind: a box cannot register itself as the handler for a file type or a URL
+  scheme, add a second command, or be started by D-Bus activation.
+- **`Exec` is `SECUREBOX enter NAME -- ` and then the box's words, each made only of
+  letters, digits and `_@+=:,./-`.** The specification has a quoting syntax, and
+  securebox does not implement it: i3's and others' launchers pass the line to `sh -c`, so
+  a word that is safe under the specification's rules can still be a command under a
+  shell's. A line with anything else in it is refused, not escaped. Field codes (`%f`,
+  `%U`…) are dropped: they would carry host paths, which the box cannot open.
+- **`Name`** keeps letters, digits, spaces and `.-_+(),&:/!#`, at most 60 characters, and
+  always gets ` (on NAME)` appended: the box chooses what its launcher is called, and
+  must not be able to call it "Files". ASCII only, which also keeps out the Unicode
+  direction overrides a name could hide its ending with.
+- **`Icon`** is taken when it is a name (`[A-Za-z0-9_.-]+`), which the host's theme
+  resolves, and dropped when it is a path. No image of the box's is copied to the host: it
+  would be parsed by the desktop shell, the most privileged thing in the session, and the
+  path form would point the shell at a host file of the box's choosing.
+- **securebox's own path** goes into both files (from `/proc/self/exe`), since a desktop
+  session's `PATH` often lacks `~/.local/bin`. It must be made of the same inert
+  characters, or `export` refuses.
+- **Ownership is by content.** A copy of every exported file is kept in
+  `DATA/NAME/exports/{bin,applications}/`. A host file is replaced or removed only when
+  `cmp` says it is identical to its copy; one the user wrote or edited is left alone. The
+  directory is also the list of a box's exports, which `export --delete` and `rm` walk.
+  A box cannot reach it: only `DATA/NAME/home` is mounted.
+- A launcher is named `securebox+NAME+APP.desktop`. No box name has a `+`, so two boxes
+  cannot claim one file.
+- The command a `--bin` script runs is typed by the user on the host, checked for the
+  same characters, and looked up in the box before anything is written.
+
+What export does not change: a program started through a launcher runs in the box, with
+the box's grants. What it does change: the host now has a file whose *name*, *icon name*
+and *arguments after `--`* a box chose, within the alphabets above.
+
 ## 4. What securebox runs
 
 No shell is ever involved on the host; every podman call is an argv list.
@@ -331,6 +407,7 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
      [--env PULSE_SERVER=unix:/run/user/UID/pulse/native]
      [--env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/UID/dbus/bus]
      --env TERM --env COLORTERM --env LANG --env LC_ALL
+     [--env NAME=VALUE | --env NAME]…                         # enter -e, after securebox's own
      NAME CMD...
 ```
 
@@ -387,10 +464,48 @@ cannot delete. `rm NAME --purge` also works after the container is gone, but onl
 `DATA/NAME/home` exists, so a directory that was never a box is never deleted, and never
 when `NAME` is someone else's container or podman itself failed.
 
+### recreate
+
+```text
+podman stop NAME                                         # when it is running
+podman commit --quiet NAME localhost/securebox-snapshot:NAME
+podman rm --force --volumes NAME
+…create's steps, with the image localhost/securebox-snapshot:NAME
+podman image rm --ignore localhost/securebox-snapshot:NAME     # rm --purge
+```
+
+Each `recreate` adds a layer to the image. That is left as it is until a box is recreated
+often enough to matter; `commit --squash` is the remedy.
+
+### export
+
+```text
+podman exec NAME sh -c 'command -v "$1" >/dev/null 2>&1' sh COMMAND      # --bin: it exists
+podman exec --env HOME=… NAME sh -c 'for d in "$HOME/.local/share/applications"
+    /usr/local/share/applications /usr/share/applications; do
+    if [ -f "$d/$1.desktop" ]; then head -c 65536 "$d/$1.desktop"; exit; fi; done; exit 1' sh APP
+cmp --silent -- DATA/NAME/exports/KIND/FILE HOST/FILE                   # is it still ours
+chmod 755 -- ~/.local/bin/COMMAND
+```
+
+The box is started first if it is stopped, exactly as `enter` starts it. The script:
+
+```sh
+#!/bin/sh
+# Written by securebox: runs rg in the box dev.
+exec /home/ada/.local/bin/securebox enter dev -- rg "$@"
+```
+
 ### State
 
-There is no state file. A box is a podman container with the label `securebox=1` and its
-home directory under `DATA` mounted as the home. Podman is the only source of truth.
+A box is a podman container with the label `securebox=1` and its home directory under
+`DATA` mounted as the home; podman is the only source of truth about boxes. Two things
+are kept beside it: `DATA/NAME/exports`, the copies of what was exported from the box, and
+the image `recreate` made of it. A third is only for the user to read: `DATA/NAME/created`,
+the `securebox create` line that makes the box with the grants it has, written by `create`
+and `recreate`. A container's grants die with it, and after an `rm` this file is what
+still says what the box was. securebox never reads it back: a grant comes from a command
+line, not from a file.
 
 ## 5. Input validation
 
@@ -432,6 +547,17 @@ host paths.
   letters, digits, `_` and `-`, none starting with a digit; no wildcard. Refused:
   `org.freedesktop.systemd1`, `org.freedesktop.Flatpak`, `org.freedesktop.DBus`.
 - **Network:** one of three words. **Publish:** `[IP:]PORT:PORT[/tcp|/udp]`, IPv4 only.
+- **Variable (`enter -e`):** `NAME=VALUE` or `NAME`, the name `[A-Za-z_][A-Za-z0-9_]*`. A
+  bare name must be set on the host, and podman reads its value from the environment, so
+  a secret passed that way is on no command line. Refused: the names securebox sets
+  itself (`HOME`, `USER`, `SECUREBOX`, `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`,
+  `PULSE_SERVER`, `DBUS_SESSION_BUS_ADDRESS`), which say where the box's home and grants
+  are. The value goes to podman as one argument, whatever is in it.
+- **Exported command (`--bin`):** a name, or an absolute path in the box, of letters,
+  digits and `_.+-`; its last element names the script, so it may not be empty, `.` or `..`.
+- **Exported application (`--app`):** `[A-Za-z0-9][A-Za-z0-9_.-]*`, with or without
+  `.desktop`: it is a file name in the box and part of one on the host.
+- **A box's `.desktop` file** is input from the box, checked as section 3 says.
 - **Remote podman:** with `CONTAINER_HOST` or `CONTAINER_CONNECTION` set, podman talks to a
   service elsewhere, where these paths mean something else; securebox refuses to run.
 
@@ -451,8 +577,9 @@ app/                           the securebox binary
   src/Cli.zs                   one argument union per command, and Command
   src/Box.zs                   Share, Network, CreateSpec, Ctx; all validation
   src/Podman.zs                pure functions: spec -> argv; parsing of inspect's output
+  src/Exports.zs               pure functions: a box's .desktop file -> a launcher's text
   src/Effects.zs               the Host effect and its real handler
-  src/Commands.zs              create, enter, list, stop, rm
+  src/Commands.zs              create, enter, list, stop, rm, recreate, export
   tests/                       unit tests, and Fixture.zs: a Host that records
 packages/argz/                 the argument parser (section 7)
 packages/posix/                exec and the other libc calls, with their C
@@ -480,10 +607,11 @@ effect Host =
   abstract isSocket   : string -> bool
   abstract realPath   : string -> string                               // "" when it isn't there
   abstract ensureDir  : string -> result<unit, string>                 // with parents, mode 0700
-  abstract tool       : string * list<string> -> int                   // systemctl, systemd-run
+  abstract tool       : string * list<string> -> int                   // systemctl, systemd-run, cmp, chmod
   abstract removeTree : string -> unit                                 // a stale socket; a box's session directory
   abstract writeFile  : string * string -> result<unit, string>        // the sound front-end's
   abstract copyFile   : string * string -> result<unit, string>        //   configuration
+  abstract listDir    : string -> list<string>                         // a box's exports
   abstract awaitPath  : string -> bool                                 // a unit's socket
   abstract say        : string -> unit                                 // a line for the user, on stderr
   abstract out        : string -> unit                                 // list's table, on stdout
@@ -636,8 +764,8 @@ zs test                                                     # every member's tes
 cd app && zs build --release --target x86_64-linux-musl     # the static binary
 ```
 
-- The release build is a static binary cross-linked through `zig cc`: about 630 KB for x86-64,
-  620 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
+- The release build is a static binary cross-linked through `zig cc`: about 880 KB for x86-64,
+  a little less for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
   arguments takes about half a millisecond. Two builds of one commit are the same bytes.
 - A release is made by hand, there is no CI: set the version in `app/zs.toml`,
   `Cli.version`, the README's install lines and `CHANGELOG.md`, run `zs test`, build the
@@ -652,16 +780,19 @@ cd app && zs build --release --target x86_64-linux-musl     # the static binary
 
 ## 9. Testing
 
-- **Unit (`zs test`, 158 tests):** validation tables and a property test (no accepted name
+- **Unit (`zs test`, 220 tests):** validation tables and a property test (no accepted name
   starts with `-` or contains `/`); `expect` tests of `createArgs` and `execArgs`, which
   pin the security flags, and a test that labelling is never off without a session grant; the
   ownership check against an image's label, another data directory and an id prefix; the
-  command flows under the recording `Host` handler; argz parse tables and `expect` tests
-  of usage text; the posix functions.
-- **End to end (`tests/e2e.sh`, 254 checks):** the built binary against real podman, on
+  command flows under the recording `Host` handler; what a launcher is made of, with a
+  table of command lines that must be refused; argz parse tables and `expect` tests of
+  usage text; the posix functions.
+- **End to end (`tests/e2e.sh`, 312 checks):** the built binary against real podman, on
   Fedora, Ubuntu and Alpine images: every row of section 3's table probed from inside the
   box, shares, exit codes, the lifecycle, the grants (the session grants included, where
-  the session has a compositor, a sound server and a bus), refusals, and containers that are not securebox's. It keeps its
+  the session has a compositor, a sound server and a bus), `recreate` on every image,
+  `export` with a `.desktop` file written to attack it, refusals, and containers that are
+  not securebox's. It keeps its
   boxes' data in a temporary `SECUREBOX_DATA`, tries the refusals against a home directory
   it made, and removes everything. This script is the acceptance test for "secure by
   default".
@@ -678,6 +809,7 @@ that cannot work. The first version of the script had no such control and could 
 | M1 ✅ | `create`, `enter`, `list`, `stop`, `rm`; `--share`, `--share-ro`, `--network`; tests | done: the end-to-end script passes on three images |
 | M2 ✅ | `--publish`, `--gpu`, `--wayland`, `--sound`, `--dbus`; the passwd fix-up for images with a clashing uid | done; the session grants at the cost section 3 states, `--ssh-agent` not built |
 | Review ✅ | a correctness review and an independent security review | done 2026-11-14; appendix D |
+| M3 ✅ | `--version`; `recreate`; `export`; `enter -e`; the `created` record | done 2026-11-14, after the reviews: not reviewed independently |
 
 ## 11. Open questions and known limits
 
@@ -699,7 +831,19 @@ that cannot work. The first version of the script had no such control and could 
    container made from an image that carries `LABEL securebox=1` shows up in it. No
    command acts on one, and no D-Bus names are shown for it.
 8. **No portals** in any box, and no bus name can be owned on the session bus.
-9. **A filter's names are fixed at create,** like every grant.
+9. **A filter's names are fixed at create,** like every grant; `recreate` is how they change.
+10. **`recreate` does not carry an image's volumes over,** and each one adds a layer to the
+    box's image.
+11. **A recreated box can keep empty directories where its old grants were mounted:** the
+    mount points are part of its files. Nothing is mounted on them.
+12. **An exported application** keeps its unlocalized name in ASCII; has an icon only when
+    the host's theme has one of that name; is refused when its command line needs quoting;
+    and opens no files from the host's file manager (field codes are dropped, and the
+    host's paths would not exist in the box anyway).
+13. **A launcher has securebox's path in it.** Move the binary, and exports must be made
+    again.
+14. **`export` writes through a dangling symbolic link** at the place it writes to: the
+    existence check follows links.
 
 ## Appendix A: what was verified, and how
 
@@ -766,7 +910,7 @@ What Z# 0.7.1 does that the design had to follow, for whoever writes M1:
 ## Appendix C: end-to-end results
 
 `tests/e2e.sh` on podman 6.1.3 (rootless, crun, pasta, SELinux enforcing, a GNOME Wayland
-session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 254 passed,
+session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 312 passed,
 0 failed.
 
 Per image: the home starts empty; the uid, `HOME` and passwd entry; zero capabilities,

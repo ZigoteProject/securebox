@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 (2026-11-14)
+
+- `securebox recreate NAME [grants]`: the box again, with the grants given now and what
+  was installed in it kept. For a box that needs the network only while it is set up:
+  `securebox recreate dev --network none`.
+- `securebox export NAME --bin COMMAND --app APPLICATION`: a script in `~/.local/bin` and
+  a launcher in the desktop's menu that run in the box; `--delete` removes them. A
+  launcher is written by securebox from checked parts of the box's `.desktop` file, never
+  copied.
+- `rm` removes what was exported from the box; `rm --purge` also the image `recreate` made.
+- `securebox enter NAME -e NAME=VALUE` sets a variable in the box, and `-e NAME` passes the
+  host's value without putting it on a command line.
+- The `securebox create` line a box was made with is kept in `DATA/NAME/created`, where it
+  outlives `rm`.
+
 ## 0.1.1 (2026-11-14)
 
 - `securebox --version`.

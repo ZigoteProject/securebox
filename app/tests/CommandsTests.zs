@@ -17,7 +17,36 @@ let private socket = ("/run/user/1000/wayland-1", "/run/user/1000/wayland-0")
 // every command that names a box
 let private commands =
   [ (fun () -> Commands.enter ctx "dev" false []); (fun () -> Commands.stop ctx "dev")
-    (fun () -> Commands.rm ctx "dev" false); (fun () -> Commands.rm ctx "dev" true) ]
+    (fun () -> Commands.rm ctx "dev" false); (fun () -> Commands.rm ctx "dev" true)
+    (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+    (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false) ]
+
+let private snapshot = "localhost/securebox-snapshot:dev"
+let private kept = dir + "/exports"
+let private script = "/home/ada/.local/bin/rg"
+let private launcher = "/home/ada/.local/share/applications/securebox+dev+app.desktop"
+
+/// podman's answers around a `recreate` of `dev`: the box is there until it is removed,
+/// and again once it is created; `failing` is the podman command that fails.
+let private recreating (failing: string) : list<string> -> ProcessResult =
+  let there = ref true
+  fun args ->
+    match args with
+    | first :: _ when first = failing -> { code = 125; output = "" }
+    | "rm" :: _ ->
+      there.Value <- false
+      { code = 0; output = "" }
+    | "create" :: _ ->
+      there.Value <- true
+      { code = 0; output = "" }
+    | "exec" :: _ -> { code = 0; output = "" }
+    | _ -> box (if there.Value then inspected "dev" "running" "\"1\"" [ devHome ] else "") args
+
+/// podman's answers for a running `dev` in which `exec` prints `output` and ends with `code`.
+let private answering (code: int) (output: string) (args: list<string>) : ProcessResult =
+  match args with
+  | "exec" :: _ -> { code = code; output = output }
+  | _ -> dev "running" [] args
 
 // containers named dev that are not the box dev
 let private notBoxes =
@@ -106,7 +135,7 @@ let tests =
     test "create: the name is free, then home directory, create, start, and the passwd line checked as the user" (fun () ->
       let spec = { name = "dev"; image = "fedora:45"; shares = [ { path = share; readOnly = false } ] }
       let (r, calls) = record (box "") [ share ] (fun () -> Commands.create ctx spec)
-      assert (r = Ok 0 && steps calls = [ "inspect"; "container"; $"{dir}/home"; "create"; "start"; "exec" ])
+      assert (r = Ok 0 && steps calls = [ "inspect"; "container"; $"{dir}/home"; "create"; "start"; "exec"; $"{dir}/created" ])
       assert (not (ran "podman exec --user 0" calls)))
     test "create: a name that is taken is refused before anything is touched" (fun () ->
       let spec = { name = "dev"; image = "fedora:45"; dbus = [ "org.example.App" ]; sound = true }
@@ -116,11 +145,14 @@ let tests =
       assert (Result.isError f))
     test "create: root rewrites the passwd line only where the image has its own" (fun () ->
       let (r, calls) = record (creating (inspected "dev" "running" "\"1\"" [ devHome ]) 1) [] (fun () -> Commands.create ctx { name = "dev"; image = "ubuntu:24.04" })
-      assert (r = Ok 0 && steps calls = [ "inspect"; "container"; $"{dir}/home"; "create"; "start"; "exec"; "inspect"; "exec" ])
-      assert (String.startsWith "podman exec --user 0 dev sh -c sed " (List.last calls)))
+      assert (r = Ok 0 && steps calls = [ "inspect"; "container"; $"{dir}/home"; "create"; "start"; "exec"; "inspect"; "exec"; $"{dir}/created" ])
+      assert (String.startsWith "podman exec --user 0 dev sh -c sed " (List.item 7 calls)))
     test "create: a box that didn't stay up is an error, not a success" (fun () ->
       let (r, calls) = record (creating (inspected "dev" "exited" "\"1\"" [ devHome ]) 255) [] (fun () -> Commands.create ctx { name = "dev"; image = "scratch" })
-      assert (Result.isError r && not (ran "podman exec --user 0" calls)))
+      assert (Result.isError r && not (ran "podman exec --user 0" calls) && not (List.exists (String.startsWith "write") calls)))
+    test "enter passes on the variables it was given, after its own" (fun () ->
+      let (_, calls) = record (dev "running" [ socket ]) [] (fun () -> Commands.enter { ctx with passEnv = [ "TERM"; "API_KEY"; "MODE=fast and loose" ] } "dev" false [ "make" ])
+      assert (String.endsWith "--env WAYLAND_DISPLAY=wayland-0 --env TERM --env API_KEY --env MODE=fast and loose dev make" (List.last calls)))
     test "create: shares that one could replace, and a session grant with the host's network, are refused" (fun () ->
       let nested = { name = "dev"; image = "x"; shares = [ { path = "/srv/a"; readOnly = false }; { path = "/srv/a/.git"; readOnly = true } ] }
       let (r, calls) = record (box "") [] (fun () -> Commands.create ctx nested)
@@ -149,7 +181,7 @@ let tests =
                   $"copy /usr/share/pipewire/pipewire-pulse.conf {at}/sound/pipewire-pulse.conf"
                   $"write {at}/sound/pipewire-pulse.conf.d/securebox.conf"; $"remove {at}/pulse/native"
                   $"systemd-run --user --quiet --collect --unit securebox-sound-dev.service --setenv PIPEWIRE_CONFIG_DIR={at}/sound --setenv PULSE_RUNTIME_PATH={at}/pulse -- pipewire-pulse" ])
-      assert (steps (List.skip 10 calls) = [ "create"; "start"; "exec" ]))
+      assert (steps (List.skip 10 calls) = [ "create"; "start"; "exec"; $"{dir}/created" ]))
     test "create --sound without PipeWire stops before podman" (fun () ->
       let spec = { name = "dev"; image = "fedora:45"; sound = true }
       let (r, calls) = record (box "") [] (fun () -> Commands.create ctx spec)
@@ -160,7 +192,7 @@ let tests =
       // "units": one is running under that name already, left by a box removed with podman
       let (r, calls) = record (box "") [ "units" ] (fun () -> Commands.create ctx spec)
       assert (r = Ok 0)
-      assert (steps calls = [ "inspect"; "container"; $"{dir}/home"; "--user"; $"{at}/dbus"; $"{at}/dbus/bus"; "--user"; "create"; "start"; "exec" ])
+      assert (steps calls = [ "inspect"; "container"; $"{dir}/home"; "--user"; $"{at}/dbus"; $"{at}/dbus/bus"; "--user"; "create"; "start"; "exec"; $"{dir}/created" ])
       assert (List.item 3 calls = "systemctl --user stop securebox-dbus-dev.service" && not (ran "systemctl --user is-active" calls))
       assert (List.exists (String.endsWith "--filter --see=org.freedesktop.Notifications --call=org.freedesktop.Notifications=org.freedesktop.Notifications.* --broadcast=org.freedesktop.Notifications=org.freedesktop.Notifications.*") calls))
     test "create that fails leaves nothing running under the name" (fun () ->
@@ -221,6 +253,76 @@ let tests =
       assert (Result.isError stopped && steps stoppedCalls = [ "inspect" ])
       let (there, thereCalls) = record (dev "exited" [ socket ]) [ "/run/user/1000/wayland-1" ] (fun () -> Commands.enter ctx "dev" false [])
       assert (there = Ok 0 && steps thereCalls = [ "inspect"; "start"; "podman" ]))
+    test "recreate: the box is stopped, kept as an image, removed, and created from that image with the grants given" (fun () ->
+      let spec = { name = "dev"; image = ""; network = NoNetwork; shares = [ { path = share; readOnly = true } ] }
+      let (r, calls) = record (recreating "") [ share ] (fun () -> Commands.recreate ctx spec)
+      assert (r = Ok 0)
+      assert (steps calls = [ "inspect"; "stop"; "commit"; "rm"; "inspect"; "container"; $"{dir}/home"; "create"; "start"; "exec"; $"{dir}/created" ])
+      assert (List.item 2 calls = $"podman commit --quiet dev {snapshot}")
+      assert (List.exists (String.endsWith $",ro --workdir /home/ada --network none {snapshot}") calls))
+    test "recreate: grants that cannot go together, and a box that isn't there, touch nothing" (fun () ->
+      let (r, calls) = record (recreating "") pipewire (fun () -> Commands.recreate ctx { name = "dev"; image = ""; network = HostNetwork; sound = true })
+      assert (Result.isError r && calls = [])
+      let (gone, goneCalls) = record (box "") [] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (gone = Error "no box named 'dev'; create it with: securebox create dev" && steps goneCalls = [ "inspect"; "container" ]))
+    test "recreate: a box whose files could not be kept is not removed" (fun () ->
+      let (r, calls) = record (recreating "commit") [] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (Result.isError r && not (ran "podman rm" calls) && not (ran "podman create" calls)))
+    test "recreate that fails once the box is removed says where its files are" (fun () ->
+      let (r, _) = record (recreating "create") [] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (match r with
+              | Error e -> String.contains $"securebox create dev {snapshot}" e
+              | Ok _ -> false))
+    test "export --bin: the command is looked for in the box; the script is written twice, the copy first, and made executable" (fun () ->
+      let (r, calls) = record (answering 0 "") [] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
+      assert (r = Ok 0)
+      assert (List.item 1 calls = "podman exec dev sh -c command -v \"$1\" >/dev/null 2>&1 sh rg")
+      assert (List.skip 2 calls
+              = [ $"mkdir {kept}/bin"; "mkdir /home/ada/.local/bin"; $"write {kept}/bin/rg"; $"write {script}"; $"chmod 755 -- {script}" ]))
+    test "export: a stopped box is started, as enter starts it" (fun () ->
+      let stopped (args: list<string>) : ProcessResult =
+        match args with
+        | "exec" :: _ -> { code = 0; output = "" }
+        | _ -> dev "exited" [] args
+      let (r, calls) = record stopped [] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
+      assert (r = Ok 0 && List.take 3 (steps calls) = [ "inspect"; "start"; "exec" ]))
+    test "export: what the box doesn't have is not exported" (fun () ->
+      for item in [ Exports.Bin "rg"; Exports.App "app" ] do
+        let (r, calls) = record (answering 1 "") [] (fun () -> Commands.export ctx "dev" [ item ] false)
+        assert (Result.isError r && not (List.exists (String.startsWith "write") calls)))
+    test "export --app: the box's .desktop file is read as the user, and a launcher of securebox's own is written" (fun () ->
+      let (r, calls) = record (answering 0 "[Desktop Entry]\nType=Application\nName=App\nExec=app %U\n") [] (fun () -> Commands.export ctx "dev" [ Exports.App "app" ] false)
+      assert (r = Ok 0 && String.startsWith "podman exec --env HOME=/home/ada dev sh -c " (List.item 1 calls) && String.endsWith " sh app" (List.item 1 calls))
+      assert (List.skip 4 calls = [ $"write {kept}/applications/securebox+dev+app.desktop"; $"write {launcher}" ])
+      // a command line of the box's that is not inert words
+      let (bad, badCalls) = record (answering 0 "[Desktop Entry]\nType=Application\nExec=sh -c \"id\"\n") [] (fun () -> Commands.export ctx "dev" [ Exports.App "app" ] false)
+      assert (Result.isError bad && not (List.exists (String.startsWith "write") badCalls)))
+    test "export writes over a file only if it is the one securebox wrote" (fun () ->
+      let (r, calls) = record (answering 0 "") [ script ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
+      assert (Result.isError r && not (List.exists (String.startsWith "write") calls))
+      let (again, _) = record (answering 0 "") [ script; kept + "/bin/rg" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
+      assert (again = Ok 0))
+    test "export needs something to export, and a path of securebox's that a launcher can be written with" (fun () ->
+      let (r, calls) = record (answering 0 "") [] (fun () -> Commands.export ctx "dev" [] false)
+      assert (Result.isError r && calls = [])
+      let (s, sCalls) = record (answering 0 "") [] (fun () -> Commands.export { ctx with self = "" } "dev" [ Exports.Bin "rg" ] false)
+      assert (Result.isError s && sCalls = []))
+    test "export --delete removes what securebox wrote, and leaves what it did not" (fun () ->
+      let (r, calls) = record (box "") [ script; kept + "/bin/rg" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] true)
+      assert (r = Ok 0 && calls = [ $"cmp --silent -- {kept}/bin/rg {script}"; $"remove {script}"; $"remove {kept}/bin/rg" ])
+      let (other, otherCalls) = record (box "") [ script ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] true)
+      assert (Result.isError other && not (ran $"remove {script}" otherCalls))
+      // without a name: all of the box's, of both kinds
+      let (all, allCalls) = record (box "") [ script; kept + "/bin/rg"; launcher; kept + "/applications/securebox+dev+app.desktop" ] (fun () -> Commands.export ctx "dev" [] true)
+      assert (all = Ok 0 && ran $"remove {script}" allCalls && ran $"remove {launcher}" allCalls))
+    test "rm removes what was exported from the box; rm --purge the image recreate made too" (fun () ->
+      let (_, calls) = record (dev "running" []) [ dir; script; kept + "/bin/rg" ] (fun () -> Commands.rm ctx "dev" false)
+      assert (ran $"remove {script}" calls && not (ran "podman image rm" calls))
+      let (_, purged) = record (dev "running" []) [ dir ] (fun () -> Commands.rm ctx "dev" true)
+      assert (ran $"podman image rm --ignore {snapshot}" purged)
+      // a box removed behind securebox's back leaves nothing on the host either
+      let (_, gone) = record (box "") [ script; kept + "/bin/rg" ] (fun () -> Commands.rm ctx "dev" false)
+      assert (ran $"remove {script}" gone))
     test "a share is what the path leads to" (fun () ->
       let asked given present = fst (record (box "") present (fun () -> Commands.share ctx given false))
       assert (asked share [ share ] = Ok { path = share; readOnly = false })

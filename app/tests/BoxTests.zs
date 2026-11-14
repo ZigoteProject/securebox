@@ -53,6 +53,19 @@ let tests =
         assert (Box.sharePath moved "/srv/boxes2" = Ok "/srv/boxes2"))
     ]
     testList "share refuses" [ for p in badShares -> test (shown p) (fun () -> assert (refused (Box.sharePath ctx p))) ]
+    test "a variable for enter: a name with a value or without, and none of securebox's own" (fun () ->
+      for v in [ "API_KEY"; "_x=1"; "MODE=fast and loose"; "EMPTY="; "A=b=c"; "PATH=/opt/bin:/usr/bin" ] do
+        assert (Box.envVar v = Ok v)
+      for v in [ ""; "=x"; "1A=x"; "A B=x"; "A-B"; "a.b=1"; "HOME=/root"; "USER"; "SECUREBOX=x"; "XDG_RUNTIME_DIR=/run/user/0"
+                 "WAYLAND_DISPLAY=wayland-1"; "PULSE_SERVER=x"; "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus" ] do
+        assert (Result.isError (Box.envVar v)))
+    test "the command that makes a box again: its grants as flags, quoted where a shell would need it" (fun () ->
+      assert (Box.createLine { name = "dev"; image = "fedora:45" } = "securebox create dev fedora:45")
+      let spec = { name = "web"; image = "docker.io/library/ubuntu:24.04"; network = NoNetwork; publish = [ "127.0.0.1:8080:80" ]
+                   shares = [ { path = "/srv/my project"; readOnly = false }; { path = "/srv/it's"; readOnly = true } ]
+                   devices = [ "/dev/dri/renderD128" ]; wayland = Some "/run/user/1000/wayland-0"; sound = true; dbus = [ "org.example.App" ] }
+      assert (Box.createLine spec
+              = "securebox create web docker.io/library/ubuntu:24.04 --share '/srv/my project' --share-ro '/srv/it'\\''s' --network none --publish 127.0.0.1:8080:80 --gpu --wayland --sound --dbus org.example.App"))
     test "what was typed for a share is made absolute; nothing typed is a mistake" (fun () ->
       assert (Box.absolutePath ctx "../assets/" = Ok "/home/ada/Projects/web/assets")
       assert (Box.absolutePath ctx "/srv//data/./x/.." = Ok "/srv/data")

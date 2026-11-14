@@ -188,6 +188,12 @@ let stopArgs (name: string) = [ "stop"; name ]
 /// With the anonymous volumes an image declared, which nothing else would ever remove.
 let rmArgs (name: string) = [ "rm"; "--force"; "--volumes"; name ]
 
+/// The image `recreate` keeps a box's files in. The box's name is the tag, which can spell
+/// any of them; a repository's name could not (`a..b` is a box).
+let snapshotImage (name: string) = $"localhost/securebox-snapshot:{name}"
+let commitArgs (name: string) = [ "commit"; "--quiet"; name; snapshotImage name ]
+let snapshotRmArgs (name: string) = [ "image"; "rm"; "--ignore"; snapshotImage name ]
+
 /// Deletes a box's directory inside podman's user namespace: files the box's root made are
 /// owned by a subordinate uid there, which the user alone cannot remove.
 let purgeArgs (ctx: Ctx) (name: string) = [ "unshare"; "rm"; "-rf"; "--"; boxDir ctx name ]
@@ -318,6 +324,17 @@ let passwdOkArgs (ctx: Ctx) (name: string) =
   [ "exec"; name; "sh"; "-c"
     "while IFS=: read -r n p u g c h s; do if [ \"$u\" = \"$1\" ]; then [ \"$n\" = \"$2\" ] && [ \"$h\" = \"$3\" ]; exit; fi; done </etc/passwd; exit 1"
     "sh"; $"{ctx.uid}"; ctx.user; ctx.home ]
+
+/// Run as the user: whether the box has a command, by name or path.
+let hasCommandArgs (name: string) (command: string) =
+  [ "exec"; name; "sh"; "-c"; "command -v \"$1\" >/dev/null 2>&1"; "sh"; command ]
+
+/// Run as the user: prints a .desktop file of the box's, by the application's name, from
+/// where the box keeps them. At most 64 KB of it: the box decides what is in there.
+let desktopFileArgs (ctx: Ctx) (name: string) (id: string) =
+  [ "exec"; "--env"; $"HOME={ctx.home}"; name; "sh"; "-c"
+    "for d in \"$HOME/.local/share/applications\" /usr/local/share/applications /usr/share/applications; do if [ -f \"$d/$1.desktop\" ]; then head -c 65536 \"$d/$1.desktop\"; exit; fi; done; exit 1"
+    "sh"; id ]
 
 /// Run as root in a new box whose passwd line is the image's: rewrites its name and home.
 /// `homePath` keeps what sed would read as syntax out of the home.

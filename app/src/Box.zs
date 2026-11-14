@@ -49,7 +49,14 @@ type Ctx =
     /// Whether standard input and output are a terminal.
     tty: bool
     /// The environment variables to pass into the box, of those that are set.
-    passEnv: list<string> }
+    passEnv: list<string>
+    /// securebox itself, by its path, for the launchers `export` writes; "" when the path
+    /// cannot be written into one.
+    self: string
+    /// Where `export` puts scripts (`~/.local/bin`) and launchers (the XDG applications
+    /// directory).
+    binDir: string
+    appsDir: string }
 
 let defaultImage = "registry.fedoraproject.org/fedora:latest"
 
@@ -177,6 +184,40 @@ let together (shares: list<Share>) : result<list<Share>, string> =
   match clash with
   | Some why -> Error why
   | None -> Ok shares
+
+/// A variable for `enter -e`: `NAME=VALUE`, or `NAME` alone for the host's value, which
+/// podman then reads from the environment and no command line shows. The ones securebox
+/// sets itself say where the box's home and its grants are, and stay its own.
+let envVar (s: string) : result<string, string> =
+  let name =
+    match String.indexOf "=" s with
+    | Some i -> String.sub s 0 i
+    | None -> s
+  let own = [ "HOME"; "USER"; "SECUREBOX"; "XDG_RUNTIME_DIR"; "WAYLAND_DISPLAY"; "PULSE_SERVER"; "DBUS_SESSION_BUS_ADDRESS" ]
+  match String.chars name with
+  | first :: rest when (Char.isLetter first || first = '_') && List.forall (fun c -> Char.isLetterOrDigit c || c = '_') rest ->
+    if List.contains name own then Error $"-e {name}: securebox sets {name} in a box itself" else Ok s
+  | _ -> Error $"'{s}' is not a variable to set: write NAME=VALUE, or NAME for the value it has here"
+
+/// The command that makes a box with these grants, as one would type it. `create` keeps it
+/// beside the box's home, where it outlives the box.
+let createLine (spec: CreateSpec) : string =
+  let inert (c: char) = Char.isLetterOrDigit c || List.contains c [ '_'; '@'; '+'; '='; ':'; ','; '.'; '/'; '-' ]
+  let quoted (s: string) = if s <> "" && List.forall inert (String.chars s) then s else "'" + String.replace s "'" "'\\''" + "'"
+  let net =
+    match spec.network with
+    | Private -> []
+    | NoNetwork -> [ "--network"; "none" ]
+    | HostNetwork -> [ "--network"; "host" ]
+  String.join " " (List.map quoted (List.concat [
+    [ "securebox"; "create"; spec.name; spec.image ]
+    List.collect (fun (s: Share) -> [ (if s.readOnly then "--share-ro" else "--share"); s.path ]) spec.shares
+    net
+    List.collect (fun p -> [ "--publish"; p ]) spec.publish
+    (if spec.devices <> [] then [ "--gpu" ] else [])
+    (if Option.isSome spec.wayland then [ "--wayland" ] else [])
+    (if spec.sound then [ "--sound" ] else [])
+    List.collect (fun n -> [ "--dbus"; n ]) spec.dbus ]))
 
 let network (s: string) : result<Network, string> =
   match s with

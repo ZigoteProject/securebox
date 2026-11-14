@@ -8,8 +8,10 @@
 #
 # Nothing of yours is touched: the boxes' data goes to a temporary directory, the boxes are
 # named sbx-e2e-<pid>-*, the refusals are tried on a fake home directory, and everything is
-# removed at the end. Needs podman and python3 (for a listener on the host's loopback);
-# images that aren't local are pulled.
+# removed at the end. The export checks do write where exports go: a script named
+# sbx-e2e-<pid>-* in ~/.local/bin and a launcher of that name in your applications
+# directory, both removed. Needs podman and python3 (for a listener on the host's
+# loopback); images that aren't local are pulled.
 set -u
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -25,6 +27,8 @@ tmp=$(mktemp -d) || exit 2
 export SECUREBOX_DATA="$tmp/data"
 export E2E_SECRET="must-not-reach-the-box"
 prefix="sbx-e2e-$$"
+bin="$HOME/.local/bin"
+apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 boxes=()
 foreign=()
 labelled=""
@@ -37,6 +41,7 @@ cleanup() {
   for c in "${foreign[@]}"; do podman container rm --force "$c" >/dev/null 2>&1; done
   [ -n "$labelled" ] && podman image rm "$labelled" >/dev/null 2>&1
   [ -n "$listener" ] && kill "$listener" 2>/dev/null
+  rm -f "$bin/$prefix-"* "$apps/securebox+$prefix-"*
   rm -rf "${tmp:?}"
 }
 trap cleanup EXIT
@@ -142,6 +147,9 @@ for image in $IMAGES; do
   echo 'exit 5' | "$SB" enter "$name" >/dev/null 2>&1
   is "$t a shell reads standard input" 5 $?
   is "$t output is the command's alone" "plain" "$("$SB" enter "$name" -- echo plain </dev/null 2>/dev/null)"
+  is "$t -e sets a variable, by value or from here" "one two|$E2E_SECRET" "$("$SB" enter "$name" -e "E2E_A=one two" -e E2E_SECRET -- sh -c 'echo "$E2E_A|$E2E_SECRET"' </dev/null 2>/dev/null)"
+  "$SB" enter "$name" -e HOME=/root -- true >/dev/null 2>&1
+  is "$t ... and not one of securebox's own" 125 $?
 
   # lifecycle
   has "$t list shows the box" "$name" "$("$SB" list 2>&1)"
@@ -150,17 +158,37 @@ for image in $IMAGES; do
   is "$t enter starts a stopped box" "up" "$(box 'echo up')"
   is "$t what root installed is still there" "ok" "$(box 'test -e /usr/e2e && echo ok')"
 
+  # recreate: the box again from its own files, with the grants given now and no others
+  snapshot="localhost/securebox-snapshot:$name"
+  out=$("$SB" recreate "$name" --share-ro "$ro" --network none 2>&1)
+  is "$t recreate" 0 $?
+  is "$t ... the box is made from its own files" "$snapshot" "$(podman inspect --type container --format '{{.ImageName}}' "$name")"
+  is "$t ... what root installed is kept" "ok" "$(box 'test -e /usr/e2e && echo ok')"
+  is "$t ... and the home" "kept" "$(box 'cat ~/e2e')"
+  is "$t ... the passwd entry is still the user's" "$user:$HOME" "$(box "grep '^[^:]*:[^:]*:$uid:' /etc/passwd | cut -d: -f1,6")"
+  is "$t ... the network is the one asked for now: none" "lo" "$(box 'echo $(ls /sys/class/net)')"
+  is "$t ... a share that was not given again is gone" "absent" "$(box "ls '$proj/made' 2>/dev/null || echo absent")"
+  is "$t ... the one given again is there" "from the host" "$(box "cat '$ro/readme'")"
+  has "$t ... still no capabilities" "CapEff:	0000000000000000" "$(box 'cat /proc/self/status')"
+  is "$t ... and nothing of the session" "absent" "$(box 'ls -d /run/user/* /run/host 2>/dev/null || echo absent')"
+  "$SB" recreate "$name" --network host --sound >/dev/null 2>&1
+  is "$t recreate with grants that cannot go together is refused" 125 $?
+  is "$t ... and the box is left as it was" "running" "$(podman inspect --type container --format '{{.State.Status}}' "$name")"
+
   # removal: the home is kept until --purge, which also deletes what the box's root made
   rootbox "touch $HOME/made-by-root" >/dev/null
   out=$("$SB" rm "$name" 2>&1)
   is "$t rm" 0 $?
   has "$t rm says where the home is" "$SECUREBOX_DATA/$name" "$out"
+  is "$t the command that made the box is kept with it" "securebox create $name $snapshot --share-ro $ro --network none" "$(cat "$SECUREBOX_DATA/$name/created" 2>&1)"
   is "$t rm keeps the home" "kept" "$(cat "$SECUREBOX_DATA/$name/home/e2e" 2>/dev/null)"
   "$SB" enter "$name" -- true >/dev/null 2>&1
   is "$t a removed box cannot be entered" 125 $?
   "$SB" rm "$name" --purge >/dev/null 2>&1
   is "$t rm --purge after the box is gone" 0 $?
   is "$t ... deletes its directory" "gone" "$([ -e "$SECUREBOX_DATA/$name" ] && echo there || echo gone)"
+  podman image exists "$snapshot"
+  is "$t ... and the image recreate kept its files in" 1 $?
 done
 
 # Once, on the first image: grants and refusals that don't depend on the image.
@@ -417,6 +445,70 @@ is "$t no sound front-end was started for it" "inactive" "$(systemctl --user is-
 "$SB" rm "$name" --purge >/dev/null 2>&1
 is "$t rm takes the image's anonymous volumes with the box" "$volumes" "$(podman volume ls --quiet | wc -l)"
 podman image rm "$hostile" >/dev/null 2>&1
+
+# export: a command and an application of a box's on the host. The .desktop file is the
+# box's word, and this one tries what a hostile box would.
+t="[export]"
+name="$prefix-export"
+boxes+=("$name")
+cmd="$prefix-hello"
+app="$prefix-app"
+self=$(realpath "$SB")
+script="$bin/$cmd"
+launcher="$apps/securebox+$name+$app.desktop"
+"$SB" create "$name" "$image" >/dev/null 2>&1
+# Writes standard input to a file in the box, as root.
+inbox() { "$SB" enter "$name" --root -- sh -c 'mkdir -p "$(dirname "$0")" && cat >"$0" && chmod 755 "$0"' "$1" 2>/dev/null; }
+inbox "/usr/local/bin/$cmd" <<'END'
+#!/bin/sh
+echo "hello from $SECUREBOX:" "$@"
+END
+inbox "/usr/share/applications/$app.desktop" <<END
+[Desktop Action evil]
+Exec=sh -c "touch ~/pwned"
+[Desktop Entry]
+Type=Application
+Name=Hello; \`touch /tmp/pwned\` \$(id)
+Name[de]=Hallo
+Exec=/usr/local/bin/$cmd --flag=1 %U
+Icon=/usr/share/icons/evil.svg
+Categories=Utility;Bad Cat;
+DBusActivatable=true
+MimeType=text/html;
+TryExec=/bin/sh
+END
+inbox "/usr/share/applications/$app-quoted.desktop" <<'END'
+[Desktop Entry]
+Type=Application
+Name=Quoted
+Exec=sh -c "echo $HOME; id"
+END
+out=$("$SB" export "$name" --bin "$cmd" --app "$app" 2>&1)
+is "$t export" 0 $?
+is "$t the script on the host runs the command in the box" "hello from $name: a b c" "$("$script" a "b c" </dev/null 2>/dev/null)"
+is "$t the launcher is securebox's own text, with the box's words checked" "[Desktop Entry]
+Type=Application
+Name=Hello touch /tmp/pwned (id) (on $name)
+Exec=$self enter $name -- /usr/local/bin/$cmd --flag=1
+Terminal=false
+Categories=Utility;
+StartupWMClass=$app" "$(cat "$launcher" 2>&1)"
+"$SB" export "$name" --app "$app-quoted" >/dev/null 2>&1
+is "$t a command line with quoting in it is not exported" "125 absent" "$? $([ -e "$apps/securebox+$name+$app-quoted.desktop" ] && echo there || echo absent)"
+"$SB" export "$name" --bin "$prefix-nothing" >/dev/null 2>&1
+is "$t a command the box doesn't have is not exported" "125 absent" "$? $([ -e "$bin/$prefix-nothing" ] && echo there || echo absent)"
+"$SB" export "$name" --delete --bin "$cmd" >/dev/null 2>&1
+is "$t export --delete removes the script" "0 gone" "$? $([ -e "$script" ] && echo there || echo gone)"
+"$SB" export "$name" --bin "$cmd" >/dev/null 2>&1
+echo "# mine now" >>"$script"
+"$SB" export "$name" --bin "$cmd" >/dev/null 2>&1
+is "$t a file that was changed since is not written over" "125 # mine now" "$? $(tail -1 "$script")"
+"$SB" recreate "$name" >/dev/null 2>&1
+is "$t recreate keeps what was exported" "there" "$([ -e "$launcher" ] && echo there || echo gone)"
+"$SB" rm "$name" --purge >/dev/null 2>&1
+is "$t rm removes the launcher" "gone" "$([ -e "$launcher" ] && echo there || echo gone)"
+is "$t ... and leaves the file that is no longer securebox's" "# mine now" "$(tail -1 "$script" 2>&1)"
+rm -f "$script"
 
 # rm --purge without a box deletes only what is a box's directory.
 t="[purge]"

@@ -10,7 +10,9 @@ let ctx : Ctx =
     offLimits = [ "/home/ada/.local/share/securebox"; "/run/user/1000" ]
     runtime = "/run/user/1000"; busAddress = "unix:path=/run/user/1000/bus"
     cwd = "/home/ada/Projects/web/src"
-    shell = "zsh"; tty = true; passEnv = [ "TERM"; "LANG" ] }
+    shell = "zsh"; tty = true; passEnv = [ "TERM"; "LANG" ]
+    self = "/usr/local/bin/securebox"; binDir = "/home/ada/.local/bin"
+    appsDir = "/home/ada/.local/share/applications" }
 
 /// Symbolic links of the recorded host: where each leads.
 let links = [ ("/srv/to-ssh", "/var/home/ada/.ssh"); ("/srv/to-web", "/home/ada/Projects/web") ]
@@ -50,6 +52,9 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
     | Host.copyFile (source, target), k ->
       calls <- ($"copy {source} {target}") :: calls
       k (Ok ())
+    | Host.listDir path, k ->
+      k (List.choose (fun (p: string) ->
+           if String.startsWith (path + "/") p then Some (String.sub p (String.length path + 1) (String.length p - String.length path - 1)) else None) present)
     | Host.awaitPath _, k -> k true
     | Host.say _, k -> k ()
     | Host.out text, k ->
