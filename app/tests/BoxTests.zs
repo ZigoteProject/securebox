@@ -14,11 +14,14 @@ let private shown (s: string) = String.replace s "\n" "\\n"
 let private goodNames = [ "dev"; "web-2"; "a.b_c"; "0x"; String.repeat 63 "a" ]
 let private badNames = [ ""; "-x"; "--help"; "Dev"; "a/b"; ".."; ".x"; "a b"; "a\nb"; "é"; String.repeat 64 "a" ]
 
+// sharePath gets paths with their links resolved: these are what it must refuse then
 let private badShares =
-  [ "/"; "/home"; "/home/ada"; "/home/ada/"; "/home/ada/Projects/.."
-    "/home/ada/.ssh"; "/home/ada/.config/git"; "/home/ada/Projects/../.gnupg"
-    "/home/ada/.local/share/securebox/dev/home"
-    "/etc"; "/etc/ssh"; "/usr/lib"; "/boot"; "/dev/dri"; "/proc/1"; "/sys"; "/var"; "/run"
+  [ "/"; "/home"; "/home/ada"; "/var/home/ada"; "/var/home"
+    "/home/ada/.ssh"; "/home/ada/.config/git"; "/var/home/ada/.ssh"; "/var/home/ada/.gnupg/x"
+    "/home/ada/.local/share/securebox"; "/home/ada/.local/share/securebox/dev/home"
+    "/etc"; "/etc/ssh"; "/usr/bin"; "/usr/lib"; "/boot"; "/dev/dri"; "/proc/1"; "/sys"; "/root"; "/root/x"
+    "/var"; "/run"; "/tmp"; "/var/tmp"; "/var/lib/containers"; "/var/log"
+    "/run/user"; "/run/user/1000"; "/run/user/1000/bus"
     "/srv/a,b"; "/srv/a:b"; "/srv/a\nb" ]
 
 let private badPorts =
@@ -35,17 +38,31 @@ let tests =
       | Ok n -> not (String.startsWith "-" n) && not (String.contains "/" n)
       | Error _ -> true)
     testList "share" [
-      test "a project directory" (fun () ->
-        assert (Box.sharePath ctx "/home/ada/Projects/web" = Ok "/home/ada/Projects/web"))
-      test "relative to the working directory, and normalized" (fun () ->
-        assert (Box.sharePath ctx "../assets/" = Ok "/home/ada/Projects/web/assets")
-        assert (Box.sharePath ctx "/srv//data/./x/.." = Ok "/srv/data"))
+      test "a project directory, by either name of the home" (fun () ->
+        assert (Box.sharePath ctx "/home/ada/Projects/web" = Ok "/home/ada/Projects/web")
+        assert (Box.sharePath ctx "/var/home/ada/Projects/web" = Ok "/var/home/ada/Projects/web"))
       test "outside the home" (fun () ->
         assert (Box.sharePath ctx "/var/data" = Ok "/var/data")
         assert (Box.sharePath ctx "/run/media/ada/usb" = Ok "/run/media/ada/usb")
+        assert (Box.sharePath ctx "/tmp/build" = Ok "/tmp/build")
         assert (Box.sharePath ctx "/home/adax" = Ok "/home/adax"))
+      test "the data directory wherever it is, and what holds it" (fun () ->
+        let moved = { ctx with dataDir = "/srv/boxes"; offLimits = [ "/srv/boxes" ] }
+        assert (refused (Box.sharePath moved "/srv/boxes") && refused (Box.sharePath moved "/srv/boxes/dev/home"))
+        assert (refused (Box.sharePath moved "/srv"))
+        assert (Box.sharePath moved "/srv/boxes2" = Ok "/srv/boxes2"))
     ]
     testList "share refuses" [ for p in badShares -> test (shown p) (fun () -> assert (refused (Box.sharePath ctx p))) ]
+    test "what was typed for a share is made absolute; nothing typed is a mistake" (fun () ->
+      assert (Box.absolutePath ctx "../assets/" = Ok "/home/ada/Projects/web/assets")
+      assert (Box.absolutePath ctx "/srv//data/./x/.." = Ok "/srv/data")
+      assert (Box.absolutePath ctx "" = Error "an empty path cannot be shared")
+      assert (Result.isError (Box.absolutePath { ctx with cwd = "." } "etc")))
+    test "the data directory is not the home or what holds it" (fun () ->
+      assert (Box.dataPath ctx.homes "/home/ada/.local/share/securebox" = Ok "/home/ada/.local/share/securebox")
+      assert (Box.dataPath ctx.homes "/srv/boxes" = Ok "/srv/boxes")
+      for d in [ "/"; "/home"; "/home/ada"; "/var/home/ada"; "/var"; "relative"; "/srv/a,b" ] do
+        assert (Result.isError (Box.dataPath ctx.homes d)))
     test "network" (fun () ->
       assert (Box.network "private" = Ok Private && Box.network "none" = Ok NoNetwork && Box.network "host" = Ok HostNetwork)
       assert (Result.isError (Box.network "bridge")))
@@ -57,7 +74,10 @@ let tests =
     test "image" (fun () ->
       assert (Box.image "ubuntu:24.04" = Ok "ubuntu:24.04")
       assert (Result.isError (Box.image "--privileged") && Result.isError (Box.image "") && Result.isError (Box.image "a b")))
-    test "user name and mountable paths" (fun () ->
+    test "user name, home and mountable paths" (fun () ->
       assert (Box.userName "ada" = Ok "ada" && Result.isError (Box.userName "a:b") && Result.isError (Box.userName ""))
-      assert (Result.isError (Box.mountable "relative") && Result.isError (Box.mountable "/a:b")))
+      assert (Result.isError (Box.mountable "relative") && Result.isError (Box.mountable "/a:b"))
+      assert (Box.homePath "/home/ada" = Ok "/home/ada")
+      for h in [ "/home/a|b"; "/home/a&b"; "/home/a\\b"; "/home/a:b"; "home" ] do
+        assert (Result.isError (Box.homePath h)))
   ]

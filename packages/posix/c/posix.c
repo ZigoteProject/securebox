@@ -1,5 +1,7 @@
-// The C side of the posix package: execvp over a packed argv.
+// The C side of the posix package: execvp over a packed argv, realpath, and the passwd entry.
 #include <errno.h>
+#include <limits.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -37,4 +39,23 @@ int32_t posix_exec(const uint8_t *buf, size_t len, int32_t argc) {
   signal(SIGPIPE, SIG_IGN);
   free(argv);
   return e;
+}
+
+// The path with every symbolic link, "." and ".." resolved, or "" when it doesn't exist.
+// The text is valid until the next call.
+const char *posix_realpath(const char *path) {
+  static char resolved[PATH_MAX];
+  return realpath(path, resolved) ? resolved : "";
+}
+
+// The user's name and home directory as the passwd database has them, or "" when it has
+// no entry for the uid (a static binary reads /etc/passwd only).
+const char *posix_user_name(void) {
+  struct passwd *pw = getpwuid(getuid());
+  return pw && pw->pw_name ? pw->pw_name : "";
+}
+
+const char *posix_user_home(void) {
+  struct passwd *pw = getpwuid(getuid());
+  return pw && pw->pw_dir ? pw->pw_dir : "";
 }

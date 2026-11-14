@@ -12,6 +12,7 @@ module Create =
     | Network of string
     | Publish of string
     | Gpu
+    | Wayland
 
   let spec a =
     match a with
@@ -21,7 +22,8 @@ module Create =
     | ShareRo _ -> { help = "share a host directory read-only (repeatable)" }
     | Network _ -> { help = "private (the default: outbound only), none or host" }
     | Publish _ -> { help = "publish a port, [IP:]HOST:BOX[/udp]; on 127.0.0.1 unless IP is given (repeatable)"; short = Some 'p' }
-    | Gpu -> { help = "give the box the GPU's render devices (/dev/dri)" }
+    | Gpu -> { help = "give the box the GPU's render devices (/dev/dri/renderD*)" }
+    | Wayland -> { help = "let GUI programs reach the Wayland compositor; SELinux confinement is off for such a box" }
 
 module Enter =
   [<Derive(Arg)>]

@@ -277,12 +277,22 @@ derive Arg =
           match m.inlineValue with
           | Some v -> c.rest.Value <- v :: c.rest.Value
           | None -> ()
-          if m.info.kind = Command then
+          if m.info.kind = Command && m.info.count > 0 then
             c.path.Value <- List.append c.path.Value [ tok ]
             let (Sub sub) = m.info.sub
             c.infos.Value <- sub
           match Shape.buildCase (List.item m.index names) (fun f -> take c) with
-          | Some (Ok v) -> acc <- v :: acc
+          | Some (Ok v) ->
+            acc <- v :: acc
+            // a command without a field takes nothing: what follows it is help or a mistake
+            if m.info.kind = Command && m.info.count = 0 then
+              match c.rest.Value with
+              | [] -> ()
+              | next :: _ ->
+                if next = "--help" || next = "-h" then
+                  err <- Some (Help (render (List.append c.path.Value [ tok ]) []))
+                else
+                  err <- Some (Invalid $"unexpected argument '{next}'")
           | Some (Error (Invalid e)) ->
             err <- Some (Invalid (if m.info.kind = Flag then $"{tok}: {e}" else e))
           | Some (Error e) -> err <- Some e

@@ -15,16 +15,26 @@ type CreateSpec =
     shares: list<Share> = []
     network: Network = Private
     publish: list<string> = []
-    gpu: bool = false }
+    /// The GPU's render devices (`--gpu`).
+    devices: list<string> = []
+    /// The compositor's socket on the host (`--wayland`).
+    wayland: option<string> = None }
 
 /// What securebox reads from its environment, once.
 type Ctx =
   { user: string
     uid: int
     gid: int
+    /// `$HOME`: where the box's own home directory is mounted.
     home: string
+    /// Every way the home directory is named: `$HOME`, the passwd entry's, and both with
+    /// their symbolic links resolved.
+    homes: list<string>
     /// Where the boxes' home directories are kept.
     dataDir: string
+    /// Directories no share may be, hold or be inside: securebox's data and the session's
+    /// runtime directory.
+    offLimits: list<string>
     cwd: string
     /// The name of the user's shell (`zsh`), looked for in the box.
     shell: string
@@ -66,23 +76,54 @@ let mountable (path: string) : result<string, string> =
     Error $"'{path}' has a comma, a colon or a control character, which a mount cannot be written with"
   else Ok path
 
-/// Whether `path` is `dir` or inside it.
-let private under (dir: string) (path: string) = dir = "/" || path = dir || String.startsWith (dir + "/") path
+/// The home directory: it is also written into a sed script that fixes the box's passwd
+/// entry, where `|`, `&` and `\` have a meaning.
+let homePath (path: string) : result<string, string> =
+  match mountable path with
+  | Error e -> Error e
+  | Ok _ ->
+    if List.exists (fun c -> c = '|' || c = '&' || c = '\\') (String.chars path) then
+      Error $"'{path}' has a '|', '&' or '\\', which the box's passwd entry cannot be written with"
+    else Ok path
 
-/// A directory to share: made absolute, and refused where sharing it would hand over the
-/// host (the home directory or what holds it, system directories, dot-directories of the
-/// home). The check is on the text of the path: it stops mistakes, not symbolic links.
-let sharePath (ctx: Ctx) (given: string) : result<string, string> =
-  let path = Path.getFullPath (if Path.isAbsolute given then given else Path.combine ctx.cwd given)
+/// Whether `path` is `dir` or inside it.
+let under (dir: string) (path: string) = dir = "/" || path = dir || String.startsWith (dir + "/") path
+
+/// Where the boxes' data may be kept: not the home directory or what holds it, which
+/// `rm --purge` would then be one mistyped name away from deleting.
+let dataPath (homes: list<string>) (path: string) : result<string, string> =
+  match mountable path with
+  | Error e -> Error e
+  | Ok _ ->
+    if List.exists (fun h -> under path h) homes then
+      Error $"'{path}' is your home directory or holds it: keep the boxes' data in a directory of its own"
+    else Ok path
+
+/// What the user typed for a share, made absolute. An empty path is a mistake (an unset
+/// variable), not the working directory.
+let absolutePath (ctx: Ctx) (given: string) : result<string, string> =
+  if given = "" then Error "an empty path cannot be shared"
+  else if Path.isAbsolute given then Ok (Path.getFullPath given)
+  else if Path.isAbsolute ctx.cwd then Ok (Path.getFullPath (Path.combine ctx.cwd given))
+  else Error $"cannot tell where '{given}' is: the working directory is gone"
+
+/// Whether a directory may be shared. `path` is absolute with its symbolic links resolved,
+/// so a link to the home directory is the home directory here. Refused: the home directory
+/// and what holds it, system directories, securebox's data, the session's runtime
+/// directory, and dot-directories of the home.
+let sharePath (ctx: Ctx) (path: string) : result<string, string> =
   let refuse why = Error $"refusing to share '{path}': {why}"
   match mountable path with
   | Error e -> Error e
   | Ok _ ->
-    if under path ctx.home then
+    if List.exists (fun h -> under path h) ctx.homes then
       refuse "it is your home directory or contains it; share a directory inside it"
-    else if List.exists (fun d -> under d path) [ "/etc"; "/usr"; "/boot"; "/dev"; "/proc"; "/sys" ] || path = "/var" || path = "/run" then
+    else if List.exists (fun d -> under d path) [ "/etc"; "/usr"; "/boot"; "/dev"; "/proc"; "/sys"; "/root"; "/run/user"; "/var/lib"; "/var/log" ]
+            || List.contains path [ "/var"; "/run"; "/tmp"; "/var/tmp" ] then
       refuse "it is a system directory"
-    else if String.startsWith (ctx.home + "/.") path then
+    else if List.exists (fun d -> under d path || under path d) ctx.offLimits then
+      refuse "it is, holds or is inside securebox's data or your session's runtime directory"
+    else if List.exists (fun h -> String.startsWith (h + "/.") path) ctx.homes then
       refuse "dot-directories of your home hold credentials and host configuration"
     else
       Ok path

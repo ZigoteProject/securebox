@@ -80,6 +80,12 @@ let tests =
     test "subcommand" (fun () ->
       assert (top [ "create"; "dev"; "-s"; "/a" ] = Ok [ Create [ Name "dev"; Share "/a" ] ]))
     test "subcommand without arguments" (fun () -> assert (top [ "list" ] = Ok [ List ]))
+    test "a subcommand without arguments takes none, and has its own help" (fun () ->
+      assert (top [ "list"; "create"; "x" ] = Error (Invalid "unexpected argument 'create'"))
+      assert (top [ "list"; "--oops" ] = Error (Invalid "unexpected argument '--oops'"))
+      match top [ "list"; "--help" ] with
+      | Error (Help text) -> assert (String.startsWith "usage: prog list [options]\n" text)
+      | _ -> assert false)
     test "unknown subcommand" (fun () ->
       assert (top [ "nope" ] = Error (Invalid "unexpected argument 'nope'")))
     test "a list positional takes the rest, options included" (fun () ->

@@ -35,3 +35,20 @@ extern chmod : cstr -> u32 -> i32
 
 /// Sets a file's or directory's permission bits (448 is 0700). Whether it worked.
 let setMode (path: string) (mode: int) = chmod path (u32 mode) = i32 0
+
+extern posix_realpath : cstr -> cstr
+extern posix_user_name : unit -> cstr
+extern posix_user_home : unit -> cstr
+extern access : cstr -> i32 -> i32
+
+/// The path with every symbolic link, `.` and `..` resolved; "" when it doesn't exist.
+let realPath (path: string) = String.ofCStr (posix_realpath path)
+
+/// The user's name in the passwd database, "" when it has no entry for the uid.
+let userName () = String.ofCStr (posix_user_name ())
+
+/// The user's home directory in the passwd database, "" when it has no entry for the uid.
+let userHome () = String.ofCStr (posix_user_home ())
+
+/// Whether the path exists, whatever it is: a file, a directory, a socket.
+let exists (path: string) = access path (i32 0) = i32 0

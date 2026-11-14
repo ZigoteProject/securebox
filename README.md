@@ -9,12 +9,13 @@ securebox create web docker.io/library/ubuntu:24.04 --share ~/Projects/web
 securebox enter web                                    # a shell; the working directory is kept inside a share
 securebox enter web -- npm test                        # one command; its exit code is securebox's
 securebox enter web --root -- apt install -y nodejs    # root, granted from the host side
+securebox create gui --wayland                         # GUI programs (see what it costs, below)
 securebox list
 securebox stop web
 securebox rm web                                       # keeps the box's home; --purge deletes it
 ```
 
-One static binary of about 260 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
+One static binary of about 340 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
 0.7.1. Podman is the only thing it needs at run time, and it is rootless only: securebox
 refuses to run as root.
 
@@ -47,8 +48,8 @@ Inside a box, by default:
   capabilities** and **no way to gain them**: `no-new-privileges` is set, so `sudo` and
   every other setuid program refuse to work;
 - the home directory is the box's own, kept in `~/.local/share/securebox/NAME/home`;
-- nothing of the host is mounted, no host environment variable is passed, `/run/user` does
-  not exist;
+- nothing of the host is mounted, no host environment variable is passed (proxy settings
+  included), `/run/user` does not exist;
 - the network is podman's private rootless one: outbound works, services listening on the
   host's `127.0.0.1` are unreachable;
 - SELinux (where the host has it) and seccomp confinement stay on.
@@ -75,12 +76,32 @@ All off by default, all given to `create`, all visible in `securebox list`.
 | `--network none` | no network at all |
 | `--network host` | the host's network namespace, loopback included |
 | `-p`, `--publish [IP:]HOST:BOX[/udp]` | a port, bound to `127.0.0.1` unless you give an address (repeatable) |
-| `--gpu` | the GPU's render devices (`/dev/dri`) |
+| `--gpu` | the GPU's render devices (`/dev/dri/renderD*`) |
+| `--wayland` | the Wayland compositor's socket, for GUI programs; **SELinux confinement is off for that box** |
 
 securebox refuses to share your home directory, anything that contains it, system
-directories, and dot-directories of your home (`~/.ssh`, `~/.config`, …). On an SELinux
-host, sharing a directory relabels it for containers, permanently; that is harmless for a
-project directory.
+directories, your session's runtime directory (`/run/user/UID`), its own data, and
+dot-directories of your home (`~/.ssh`, `~/.config`, …). A path is judged by what it leads
+to, so a symbolic link to any of those is refused too. On an SELinux host, sharing a
+directory relabels it for containers, permanently; that is harmless for a project
+directory.
+
+### GUI programs: `--wayland`
+
+A box created with `--wayland` gets a private runtime directory holding one thing, the
+compositor's socket, and `enter` sets `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`. Wayland
+programs then open their windows on your desktop; add `--gpu` for accelerated rendering.
+
+The cost, on an SELinux host: SELinux does not let a confined container connect to a
+socket of your session, and there is no narrower switch, so such a box runs with SELinux
+labelling disabled. Its other protections are unchanged (own home, no capabilities,
+no-new-privileges, seccomp, private network, none of the session's other sockets), and
+boxes created without the flag keep their confinement. A Wayland client can also do what
+the compositor lets any client do; on GNOME and KDE that excludes capturing the screen.
+
+A `--wayland` box needs the compositor running to start, and after you log out and in
+again it needs `securebox stop NAME` before the next `enter`. There is no sound, no D-Bus
+and no portals, and X11-only programs do not run.
 
 Grants are fixed when the box is created. To change them, remove the box and create it
 again: its home directory survives (`rm` keeps it, and `create` picks it up), packages
@@ -108,13 +129,13 @@ cp build/securebox ~/.local/bin/
 ## Testing
 
 ```sh
-zs test            # 93 unit tests: validation, the exact podman arguments, the command flows
-tests/e2e.sh       # 153 checks with real podman, on Fedora, Ubuntu and Alpine images
+zs test            # 125 unit tests: validation, the exact podman arguments, the command flows
+tests/e2e.sh       # 193 checks with real podman, on Fedora, Ubuntu and Alpine images
 ```
 
 The end-to-end script creates boxes named `sbx-e2e-<pid>-*`, keeps their data in a
-temporary directory, probes each box from the inside for everything claimed above, and
-removes what it made. It needs python3 on the host and pulls the images that aren't local.
+temporary directory, probes each box from the inside for everything claimed above, tries
+the refusals against a home directory it made for the purpose, and removes what it made. It needs python3 on the host and pulls the images that aren't local.
 
 ## Where things are
 
@@ -122,21 +143,22 @@ removes what it made. It needs python3 on the host and pulls the images that are
 app/               the securebox binary: Cli, Box (validation), Podman (argument lists),
                    Effects (the outside world), Commands, main
 packages/argz/     an Argu-style argument parser for Z#: a union is the command line
-packages/posix/    exec, user ids, isatty, chmod: all of the project's C (40 lines)
+packages/posix/    exec, realpath, user ids, isatty, chmod: all of the project's C (60 lines)
 tests/e2e.sh       the end-to-end tests
 DESIGN.md          the design: threat model, the podman command lines, what was verified
 ```
 
 `SECUREBOX_DATA` moves the boxes' home directories somewhere else than
-`$XDG_DATA_HOME/securebox`.
+`$XDG_DATA_HOME/securebox`. It cannot be your home directory or hold it.
+
+The code has had a correctness review and an independent security review; DESIGN.md,
+appendix D, lists what they found and what was done about each finding.
 
 ## Limits
 
-- Linux and rootless podman only. Developed and tested on podman 6.1 with SELinux enforcing.
-- **No graphical programs.** Wayland and ssh-agent grants were tested and left out: SELinux
-  does not let a confined box connect to a socket of your session, and the only way around
-  that is to turn the confinement off. X11 is left out because an X11 socket lets the box
-  read your keystrokes.
+- Linux and rootless podman 5.3 or later, the local one only (not `CONTAINER_HOST`).
+  Developed and tested on podman 6.1 with SELinux enforcing.
+- No X11 (an X11 socket lets the box read your keystrokes), and no ssh-agent grant.
 - An image needs `sh` and a `sleep` that takes `infinity`; distroless images won't work.
 - Give `create` a full image name (`docker.io/library/ubuntu:24.04`); podman cannot ask
   which registry a short name means.
