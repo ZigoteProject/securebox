@@ -19,6 +19,11 @@ let tests =
       assert (not (Posix.entryExists "/no/such/path") && not (Posix.isRegularFile "/no/such/path")))
     test "createFile refuses a path that has something at it, a link included" (fun () ->
       expect (Posix.createFile "/proc/self/exe" "x" 420) (Error "cannot create /proc/self/exe: File exists"))
+    test "capture: the exit code and the output, without the errors; too much and too long are ended" (fun () ->
+      assert (Posix.capture "sh" [ "-c"; "echo out; echo err >&2; exit 3" ] 5 = (3, "out\n"))
+      assert (Posix.capture "no-such-program-zz" [] 5 = (127, ""))
+      assert (Posix.capture "sh" [ "-c"; "yes" ] 5 = (125, ""))
+      assert (Posix.capture "sh" [ "-c"; "sleep 30" ] 1 = (124, "")))
     test "the passwd entry" (fun () -> assert (Posix.userName () <> "" && String.startsWith "/" (Posix.userHome ())))
     test "a NUL in an argument is refused" (fun () ->
       expect (Posix.exec "true" [ "a\0b" ]) "cannot run true: an argument contains a NUL byte")

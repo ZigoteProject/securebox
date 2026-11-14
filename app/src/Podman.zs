@@ -68,6 +68,9 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
     else []
   List.concat [
     [ "create"; "--name"; spec.name; "--hostname"; spec.name; "--label"; "securebox=1" ]
+    // a box's own files are an image of this machine: one that is gone is not looked for
+    // at a registry, which for this name would be whatever listens on the host's loopback
+    (if String.startsWith "localhost/securebox-snapshot:" spec.image then [ "--pull=never" ] else [])
     [ "--init"; "--entrypoint"; "[\"sleep\",\"infinity\"]" ]
     [ "--userns=keep-id"; "--user"; $"{ctx.uid}:{ctx.gid}" ]
     [ "--passwd-entry"; $"{ctx.user}:*:{ctx.uid}:{ctx.gid}::{ctx.home}:/bin/sh" ]
@@ -330,7 +333,8 @@ let hasCommandArgs (name: string) (command: string) =
   [ "exec"; name; "sh"; "-c"; "command -v \"$1\" >/dev/null 2>&1"; "sh"; command ]
 
 /// Run as the user: prints a .desktop file of the box's, by the application's name, from
-/// where the box keeps them. At most 64 KB of it: the box decides what is in there.
+/// where the box keeps them. The box decides what is in there, and how much: `head` is the
+/// box's too, so the 64 KB it is asked for are counted again on the host (`Host.inBox`).
 let desktopFileArgs (ctx: Ctx) (name: string) (id: string) =
   [ "exec"; "--env"; $"HOME={ctx.home}"; name; "sh"; "-c"
     "for d in \"$HOME/.local/share/applications\" /usr/local/share/applications /usr/share/applications; do if [ -f \"$d/$1.desktop\" ]; then head -c 65536 \"$d/$1.desktop\"; exit; fi; done; exit 1"

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+The findings of an independent review of `recreate` and `export` (DESIGN.md, appendix D):
+
+- A launcher is now named "NAME: Application", not "Application (on NAME)", which a box
+  could imitate or push out of sight. It keeps only the menu's main categories, and its
+  window class is the application's name. **Launchers exported by 0.2.0 keep their old
+  text until they are exported again.**
+- What securebox reads from commands it runs in a box is bounded on the host: 64 KB,
+  thirty seconds, and the box's standard error is not shown.
+- `create` removes what an earlier box of the same name had exported.
+- `recreate` checks that the session has what the new grants need before it touches the
+  box, removes a new box that does not come up, stops the old box's D-Bus filter and
+  sound front-end with it, and never asks a registry for the box's image.
+- One securebox at a time works on a box: the others wait.
+- `export` refuses when securebox itself is in a directory the box has.
 - `recreate` (and `create`) check each share again just before the box is made. A box
   with a read-write share could replace a directory inside it with a link while
   `recreate` was narrowing the share to that directory, and the link's target was

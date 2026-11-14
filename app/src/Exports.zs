@@ -47,11 +47,20 @@ let application (s: string) : result<string, string> =
 let scriptName (command: string) = Path.getFileName command
 let launcherName (box: string) (id: string) = $"securebox+{box}+{id}.desktop"
 
+/// The categories a launcher may have: the menu's main ones, which say where it is shown
+/// and nothing more. Others are read by programs: a `TerminalEmulator` is what a desktop
+/// may start the host's terminal programs in.
+let private mainCategories =
+  [ "AudioVideo"; "Audio"; "Video"; "Development"; "Education"; "Game"; "Graphics"; "Network"; "Office"; "Science"
+    "Settings"; "System"; "Utility" ]
+
 /// The launcher for a box's .desktop file. From its `[Desktop Entry]` come the name (some
 /// punctuation and no more), the command (inert words only: anything quoted is refused,
 /// and the %f and %U a desktop fills in with the host's files are dropped), the icon when
 /// it is a name (the host's theme has it or not; a file of the box's is never read by the
-/// desktop), whether it wants a terminal, its categories and its window class.
+/// desktop), whether it wants a terminal, and its main categories. Its window class is the
+/// application's name as the user gave it, not what the file claims: a shell that goes by
+/// the class would count another program's windows as this launcher's.
 let launcher (id: string) (text: string) : result<Launcher, string> =
   let lines = List.map String.trim (String.splitLines text)
   let entry =
@@ -63,8 +72,12 @@ let launcher (id: string) (text: string) : result<Launcher, string> =
     | Some i when String.trim (String.sub l 0 i) = key -> Some (String.trim (String.sub l (i + 1) (String.length l - i - 1)))
     | _ -> None
   let value (key: string) = Option.defaultValue "" (List.tryPick (keyed key) entry)
-  let named (c: char) = Char.isLetterOrDigit c || List.contains c [ ' '; '.'; '-'; '_'; '+'; '('; ')'; ','; '&'; ':'; '/'; '!'; '#' ]
-  let name = String.trim (String.ofChars (List.take 60 (List.filter named (String.chars (value "Name")))))
+  // no brackets, which would let a name end in its own "(on host)", and no run of spaces,
+  // which would push what follows it out of a menu's sight
+  let named (c: char) = Char.isLetterOrDigit c || List.contains c [ ' '; '.'; '-'; '_'; '+'; ','; '&'; ':'; '/'; '!'; '#' ]
+  let spelled = String.ofChars (List.filter named (String.chars (value "Name")))
+  let spaced = String.join " " (List.filter (fun w -> w <> "") (String.split " " spelled))
+  let name = String.trim (String.ofChars (List.take 40 (String.chars spaced)))
   let words = List.filter (fun w -> w <> "") (String.split " " (value "Exec"))
   let exec = List.filter (fun w -> not (String.startsWith "%" w && String.length w = 2)) words
   let orElse (fallback: string) (s: string) = if all plain s then s else fallback
@@ -76,18 +89,19 @@ let launcher (id: string) (text: string) : result<Launcher, string> =
            exec = exec
            icon = orElse "" (value "Icon")
            terminal = value "Terminal" = "true"
-           categories = List.filter (all (fun c -> Char.isLetterOrDigit c || c = '-')) (String.split ";" (value "Categories"))
-           windowClass = orElse id (value "StartupWMClass") }
+           categories = List.filter (fun c -> List.contains c mainCategories) (String.split ";" (value "Categories"))
+           windowClass = id }
     | _ ->
       Error $"{id}.desktop starts its application with a command line securebox will not write on the host: it takes plain words only (letters, digits and _@+=:,./-), nothing quoted. Export the command with --bin, and write a launcher for it yourself"
 
-/// The launcher, as a .desktop file. `self` is securebox, by its path. The name says which
-/// box it is: an application of a box's cannot pass for one of the host's.
+/// The launcher, as a .desktop file. `self` is securebox, by its path. The name starts
+/// with the box's, where no length of name hides it: an application of a box's cannot pass
+/// for one of the host's.
 let desktopFile (self: string) (box: string) (l: Launcher) : string =
   String.concat [
     "[Desktop Entry]\n"
     "Type=Application\n"
-    "Name=" + l.title + " (on " + box + ")\n"
+    "Name=" + box + ": " + l.title + "\n"
     "Exec=" + self + " enter " + box + " -- " + String.join " " l.exec + "\n"
     (if l.icon = "" then "" else "Icon=" + l.icon + "\n")
     (if l.terminal then "Terminal=true\n" else "Terminal=false\n")

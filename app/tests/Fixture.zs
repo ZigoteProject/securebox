@@ -29,6 +29,10 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
     | Host.capture args, k ->
       calls <- ("podman " + String.join " " args) :: calls
       k (Ok (answer args))
+    | Host.inBox args, k ->
+      calls <- ("podman " + String.join " " args) :: calls
+      k (Ok (answer args))
+    | Host.lock _, k -> k (Ok ())
     | Host.exec args, k ->
       calls <- ("exec podman " + String.join " " args) :: calls
       k 0

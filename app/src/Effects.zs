@@ -4,6 +4,13 @@
 effect Host =
   /// Runs podman and waits: its exit code and what it printed. Its errors go to the terminal.
   abstract capture : list<string> -> result<ProcessResult, string>
+  /// Runs podman for a command inside a box, where what is printed is the box's to choose:
+  /// at most 64 KB of it is taken, the command has half a minute, and its errors are not
+  /// shown on the terminal. A command ended for either has a code other than 0.
+  abstract inBox : list<string> -> result<ProcessResult, string>
+  /// One securebox at a time for a box: takes the lock that the file is, until securebox
+  /// ends or becomes podman, and waits for it if another has it.
+  abstract lock : string -> result<unit, string>
   /// Replaces securebox with podman. Gives an exit code only when podman couldn't start.
   abstract exec : list<string> -> int
   abstract dirExists : string -> bool
@@ -56,9 +63,26 @@ let rec private appears (path: string) (tries: int) =
     Task.run (Task.sleep 50)
     appears path (tries - 1)
 
+let private locked (path: string) : result<unit, string> =
+  match createAll (Path.getDirectoryName path) with
+  | Error e -> Error e
+  | Ok () ->
+    match Posix.lock path false with
+    | Posix.Held -> Ok ()
+    | Posix.Failed e -> Error e
+    | Posix.Busy ->
+      eprintln "securebox: waiting for another securebox that is working on this box"
+      match Posix.lock path true with
+      | Posix.Failed e -> Error e
+      | _ -> Ok ()
+
 let real (app: unit -> 'a) =
   handle app () with
   | Host.capture args, k -> k (Process.run "podman" args)
+  | Host.inBox args, k ->
+    let (code, output) = Posix.capture "podman" args 30
+    k (Ok { code = code; output = output })
+  | Host.lock path, k -> k (locked path)
   | Host.exec args, k ->
     eprintln ("securebox: " + Posix.exec "podman" args)
     k 125

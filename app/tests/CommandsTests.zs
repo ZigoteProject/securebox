@@ -269,6 +269,56 @@ let tests =
       let spec = { name = "dev"; image = "fedora:45"; shares = [ { path = "/srv/to-web"; readOnly = false } ] }
       let (r, calls) = record (box "") [ share ] (fun () -> Commands.create ctx spec)
       assert (Result.isError r && not (ran "podman create" calls)))
+    test "recreate: what the session lacks for the new grants is found before the box is touched" (fun () ->
+      // no PipeWire here, and no compositor where --wayland was pointed
+      let (r, calls) = record (recreating "") [] (fun () -> Commands.recreate ctx { name = "dev"; image = ""; sound = true })
+      assert (Result.isError r && steps calls = [ "inspect" ])
+      let (w, wCalls) = record (recreating "") [] (fun () -> Commands.recreate ctx { name = "dev"; image = ""; wayland = Some "/run/user/1000/wayland-1" })
+      assert (Result.isError w && steps wCalls = [ "inspect" ]))
+    test "recreate without a grant the box had: its filter and its front-end are stopped, and none is started" (fun () ->
+      let there = ref true
+      let had (args: list<string>) : ProcessResult =
+        match args with
+        | "rm" :: _ ->
+          there.Value <- false
+          { code = 0; output = "" }
+        | "create" :: _ ->
+          there.Value <- true
+          { code = 0; output = "" }
+        | "exec" :: _ -> { code = 0; output = "" }
+        | _ -> box (if there.Value then inspected "dev" "running" "\"1\"" [ devHome; bus; sound ] else "") args
+      let (r, calls) = record had [ "units" ] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (r = Ok 0)
+      assert (ran "systemctl --user stop securebox-dbus-dev.service" calls && ran "systemctl --user stop securebox-sound-dev.service" calls && ran $"remove {at}" calls)
+      assert (not (ran "systemd-run" calls))
+      assert (not (List.exists (fun c -> String.startsWith "podman create" c && String.contains "securebox.dbus" c) calls)))
+    test "recreate: a new box that does not come up is removed, so that none of the name is left" (fun () ->
+      let (r, calls) = record (recreating "start") [] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (Result.isError r && List.last calls = "podman rm --force --volumes dev")
+      // create leaves its own for the user to look at, as it says
+      let failing (args: list<string>) : ProcessResult =
+        match args with
+        | "start" :: _ -> { code = 125; output = "" }
+        | _ -> box "" args
+      let (c, cCalls) = record failing [] (fun () -> Commands.create ctx { name = "dev"; image = "fedora:45" })
+      assert (Result.isError c && not (ran "podman rm" cCalls)))
+    test "recreate makes the box from its own image without asking a registry for it" (fun () ->
+      let (_, calls) = record (recreating "") [] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (ran "podman create --name dev --hostname dev --label securebox=1 --pull=never " calls)
+      let (_, plain) = record (box "") [] (fun () -> Commands.create ctx { name = "dev"; image = "fedora:45" })
+      assert (not (List.exists (String.contains "--pull") plain)))
+    test "create: a new box does not take over what an earlier box of its name exported; recreate keeps it" (fun () ->
+      let (r, calls) = record (box "") [ script; kept + "/bin/rg" ] (fun () -> Commands.create ctx { name = "dev"; image = "fedora:45" })
+      assert (r = Ok 0 && ran $"unlink {script}" calls && ran $"remove {kept}/bin/rg" calls)
+      let (again, againCalls) = record (recreating "") [ script; kept + "/bin/rg" ] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (again = Ok 0 && not (ran $"unlink {script}" againCalls)))
+    test "export: not when securebox itself is a file the box can write" (fun () ->
+      let inShare = { ctx with self = share + "/build/securebox" }
+      let (r, calls) = record (dev "running" [ (share, share) ]) [] (fun () -> Commands.export inShare "dev" [ Exports.Bin "rg" ] false)
+      assert (Result.isError r && steps calls = [ "inspect" ])
+      let inHome = { ctx with self = dir + "/home/bin/securebox" }
+      let (h, _) = record (dev "running" []) [] (fun () -> Commands.export inHome "dev" [ Exports.Bin "rg" ] false)
+      assert (Result.isError h))
     test "recreate: grants that cannot go together, and a box that isn't there, touch nothing" (fun () ->
       let (r, calls) = record (recreating "") pipewire (fun () -> Commands.recreate ctx { name = "dev"; image = ""; network = HostNetwork; sound = true })
       assert (Result.isError r && calls = [])
@@ -312,8 +362,8 @@ let tests =
       // its own file is removed, and created again: never written into
       let (again, againCalls) = record (answering 0 "") [ script; kept + "/bin/rg" ] (fun () -> Commands.export ctx "dev" [ Exports.Bin "rg" ] false)
       assert (again = Ok 0 && List.skip 2 againCalls
-              = [ $"cmp --silent -- {kept}/bin/rg {script}"; $"unlink {script}"; $"mkdir {kept}/bin"; "mkdir /home/ada/.local/bin"
-                  $"write {kept}/bin/rg"; $"create {script} 493" ]))
+              = [ $"cmp --silent -- {kept}/bin/rg {script}"; $"mkdir {kept}/bin"; "mkdir /home/ada/.local/bin"
+                  $"write {kept}/bin/rg"; $"unlink {script}"; $"create {script} 493" ]))
     test "export does not write through a symbolic link, dangling or not, and does not remove one" (fun () ->
       let linked = "/home/ada/.local/bin/linked"
       let touched (calls: list<string>) = List.exists (fun c -> String.startsWith "write" c || String.startsWith "create" c || String.startsWith "unlink" c) calls

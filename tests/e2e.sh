@@ -472,7 +472,8 @@ Name=Hello; \`touch /tmp/pwned\` \$(id)
 Name[de]=Hallo
 Exec=/usr/local/bin/$cmd --flag=1 %U
 Icon=/usr/share/icons/evil.svg
-Categories=Utility;Bad Cat;
+Categories=Utility;Bad Cat;TerminalEmulator;
+StartupWMClass=firefox
 DBusActivatable=true
 MimeType=text/html;
 TryExec=/bin/sh
@@ -488,7 +489,7 @@ is "$t export" 0 $?
 is "$t the script on the host runs the command in the box" "hello from $name: a b c" "$("$script" a "b c" </dev/null 2>/dev/null)"
 is "$t the launcher is securebox's own text, with the box's words checked" "[Desktop Entry]
 Type=Application
-Name=Hello touch /tmp/pwned (id) (on $name)
+Name=$name: Hello touch /tmp/pwned id
 Exec=$self enter $name -- /usr/local/bin/$cmd --flag=1
 Terminal=false
 Categories=Utility;
@@ -522,12 +523,30 @@ is "$t a link to the same text is not written over" "125 link" "$? $([ -L "$bin/
 "$SB" export "$name" --delete --bin "$cmd-linked" >/dev/null 2>&1
 is "$t ... and not removed" "125 link" "$? $([ -L "$bin/$cmd-linked" ] && echo link || echo replaced)"
 rm -f "$bin/$cmd-linked"
+# The box's own head decides how much securebox is sent: more than it will take, on both streams.
+inbox "/usr/local/bin/head" <<'END'
+#!/bin/sh
+yes ESCAPE >&2 | yes
+END
+out=$(timeout 60 "$SB" export "$name" --app "$app" 2>&1)
+is "$t a box that prints without end is not read without end, and not onto the terminal" "125 0" "$? $(printf '%s' "$out" | grep -c ESCAPE)"
+"$SB" enter "$name" --root -- rm -f /usr/local/bin/head 2>/dev/null
 "$SB" recreate "$name" >/dev/null 2>&1
 is "$t recreate keeps what was exported" "there" "$([ -e "$launcher" ] && echo there || echo gone)"
 "$SB" rm "$name" --purge >/dev/null 2>&1
 is "$t rm removes the launcher" "gone" "$([ -e "$launcher" ] && echo there || echo gone)"
 is "$t ... and leaves the file that is no longer securebox's" "# mine now" "$(tail -1 "$script" 2>&1)"
 rm -f "$script"
+# A box removed behind securebox's back leaves its exports; a new box of the name does not get them.
+"$SB" create "$name" "$image" >/dev/null 2>&1
+inbox "/usr/local/bin/$cmd" <<'END'
+#!/bin/sh
+END
+"$SB" export "$name" --bin "$cmd" >/dev/null 2>&1
+podman rm --force "$name" >/dev/null 2>&1
+"$SB" create "$name" "$image" >/dev/null 2>&1
+is "$t a new box does not take over what an earlier one of its name exported" "gone" "$([ -e "$script" ] && echo there || echo gone)"
+"$SB" rm "$name" --purge >/dev/null 2>&1
 
 # rm --purge without a box deletes only what is a box's directory.
 t="[purge]"

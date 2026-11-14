@@ -77,3 +77,35 @@ let createFile (path: string) (text: string) (mode: int) : result<unit, string> 
 
 /// Removes the file or the symbolic link at the path itself. Whether it worked.
 let removeFile (path: string) = unlink path = i32 0
+
+extern posix_capture : span<u8> -> i32 -> i32 -> cstr
+extern posix_capture_code : unit -> i32
+extern posix_lock : cstr -> i32 -> i32
+
+/// Runs `program`, found on PATH, for a caller that does not trust what it prints: its exit
+/// code and its standard output, of which at most 64 KB is taken. It has `seconds` to end,
+/// reads nothing, and its standard error is dropped. The code is 124 when it ran out of
+/// time, 125 when it printed more, 127 when it could not be started; the output is then "".
+let capture (program: string) (args: list<string>) (seconds: int) : int * string =
+  let argv = program :: args
+  if List.exists (String.contains "\0") argv then (127, "")
+  else
+    let packed = String.concat (List.map (fun a -> a + "\0") argv)
+    let output = String.ofCStr (posix_capture (String.bytes packed) (i32 (List.length argv)) (i32 seconds))
+    (int (posix_capture_code ()), output)
+
+/// How `lock` ended.
+type Lock =
+  | Held
+  /// Another process has it, and it was not waited for.
+  | Busy
+  | Failed of string
+
+/// Takes the lock that the file at `path` is (made if it is not there), until this process
+/// ends or is replaced by `exec`. With `wait` it is waited for. A process has one lock: once
+/// it holds one, every call is `Held`.
+let lock (path: string) (wait: bool) : Lock =
+  let e = posix_lock path (i32 (if wait then 1 else 0))
+  if e = i32 0 then Held
+  else if e < i32 0 then Busy
+  else Failed $"cannot lock {path}: {String.ofCStr (strerror e)}"

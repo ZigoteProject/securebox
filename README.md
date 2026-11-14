@@ -218,7 +218,7 @@ securebox export dev --delete --bin rg           # removes it; --delete alone, a
 `--bin` takes a command's name or its path in the box, and writes a three-line script that
 runs `securebox enter dev -- rg "$@"`. `--app` takes the name of a `.desktop` file of the
 box's (`securebox enter dev -- ls /usr/share/applications` lists them) and writes a
-launcher called "*Name* (on dev)". A graphical application also needs the box to have
+launcher called "dev: *Name*". A graphical application also needs the box to have
 `--wayland`.
 
 Both run in the box, with the box's grants and nothing more: a launcher is `securebox
@@ -227,8 +227,8 @@ is a file on the host made from what the box says:
 
 - **Nothing of the box's `.desktop` file is copied.** securebox writes its own, with seven
   keys. From the box come the name (letters, digits and a little punctuation), the command
-  line, the icon's *name*, whether it wants a terminal, its categories and its window
-  class, each checked character by character. Its actions, MIME types, `TryExec` and
+  line, the icon's *name*, whether it wants a terminal and which of the menu's main
+  categories it is in, each checked character by character. Its actions, MIME types, `TryExec` and
   D-Bus activation are not taken: an exported application never becomes the handler for
   your links or files.
 - **The command line must be plain words** (letters, digits and `_@+=:,./-`). Some desktops
@@ -238,8 +238,14 @@ is a file on the host made from what the box says:
   host's paths mean nothing in the box.
 - **Icons are your theme's.** The box names an icon and your desktop shows it if it has
   one; an image file of the box's is never put where your desktop would read it.
-- **The name always ends in "(on NAME)"**, so an application of a box's cannot pass for
-  one of the host's.
+- **The name always starts with the box's** ("dev: Files"), where no length of name
+  pushes it out of sight, so an application of a box's cannot pass for one of the host's.
+  For the same reason it cannot call itself a terminal emulator, which a desktop may start
+  the host's own programs in, or claim another program's windows.
+- **A new box does not take over an old one's exports.** `create` under a name that has
+  exports left (the box was removed with podman, say) removes them and says so; `recreate`
+  keeps them. And `export` refuses when securebox itself is in a directory the box has:
+  every launcher would run a file the box can replace.
 - **securebox only replaces and removes files it wrote.** It keeps a copy of each in the
   box's data directory, and a file on the host that differs from its copy (yours, or one
   you edited) is left alone, by `export`, by `--delete` and by `rm`.
@@ -285,7 +291,7 @@ host and pulls the images that aren't local.
 app/               the securebox binary: Cli, Box (validation), Podman (argument lists),
                    Exports (launchers), Effects (the outside world), Commands, main
 packages/argz/     an Argu-style argument parser for Z#: a union is the command line
-packages/posix/    exec, realpath, user ids, isatty, chmod, exclusive file creation: all of the project's C (100 lines)
+packages/posix/    exec, realpath, user ids, exclusive file creation, a bounded run, a lock: all of the project's C (230 lines)
 tests/e2e.sh       the end-to-end tests
 tools/release.sh   a release's files, built, tested and signed
 release-signers    the key releases are signed with

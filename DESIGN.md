@@ -269,10 +269,24 @@ committed to an image, removed, and created from that image with the grants now 
   ~/work/proj`, could have made `proj` a link to `~/.ssh` in between (it can even see the
   stop coming, as a pending signal). A share that is no longer the directory that was
   checked fails the command, the first time with the box intact.
-- **Nothing is touched until the request is known to be coherent**, and the box is removed
-  only after its files are in the image. If the new box then cannot be made, the error
-  names the image and the `create` that brings the box back. The home directory is not
-  involved at all: it is a bind mount, kept as `rm` keeps it.
+- **Nothing is touched until the request is known to be coherent, and the session to
+  have what the new grants need** (a runtime directory and a bus for `--dbus`, PipeWire
+  and its PulseAudio configuration for `--sound`, the compositor's socket for
+  `--wayland`). What cannot be told beforehand, a port that is taken, still fails after
+  the box is removed. The box is stopped as `stop` stops it, its filter and front-end
+  with it, and removed only after its files are in the image. If the new box then cannot
+  be made, or is made and does not come up, no container of the name is left, and the
+  error names the image and the `create` that brings the box back. That `create` is a new
+  box's: what the old one had exported is removed by it, and exported again by hand. The
+  home directory is not involved at all: it is a bind mount, kept as `rm` keeps it.
+- **The image is never looked for at a registry** (`--pull=never`). Its name starts with
+  `localhost/`, and a missing one would otherwise be asked of whatever listens on the
+  host's loopback.
+- **One securebox at a time for a box.** `create`, `enter`, `export`, `stop`, `rm` and
+  `recreate` take a lock (`flock` on `DATA/.locks/NAME`) and wait for it; `enter` gives
+  it up when it becomes podman. Without it a launcher's `enter` between `recreate`'s stop
+  and its remove started the old box again: what the box wrote after the commit was
+  lost, and the box was running again while its shares were being looked at.
 - **The image carries what the container had**: its labels (`securebox=1`, and
   `securebox.dbus` if it had one), its entrypoint and user. `create` states every one of
   those again, and a box's D-Bus names are read only where securebox's own directory is
@@ -293,26 +307,45 @@ is the direction: until here nothing of a box's ever became a file outside its h
 its shares, and a launcher is a file the desktop reads and may hand to a shell.
 
 - **A launcher is written, never copied.** A box's `.desktop` file is read as the user
-  (`head -c 65536`, so the box cannot make securebox read without end), and securebox
+  (at most 64 KB of it), and securebox
   writes a file of its own with seven keys: `Type`, `Name`, `Exec`, `Icon`, `Terminal`,
   `Categories`, `StartupWMClass`. Only `[Desktop Entry]` is read, and of a key its first
   line. `Actions`, `MimeType`, `DBusActivatable`, `TryExec`, `Path` and everything else
   stay behind: a box cannot register itself as the handler for a file type or a URL
   scheme, add a second command, or be started by D-Bus activation.
+- **What a box prints to securebox is bounded on the host.** The commands securebox runs
+  in a box for itself (the passwd check, `command -v`, reading a `.desktop` file) run the
+  box's `sh`, `sed` and `head`, which a box can replace with anything. Their output is
+  read by `posix_capture`: 64 KB at most, thirty seconds, standard error to `/dev/null`,
+  and the program killed when it goes over either. So a box cannot make securebox read
+  without end or wait without end, and cannot write escape sequences to the terminal of
+  a command that was not `enter`.
+- **`Categories`** keeps the menu's main ones (`Utility`, `Network`, …) and drops the
+  rest: additional categories are read by programs, and `TerminalEmulator` is how a
+  desktop picks what to start the host's terminal programs in. **`StartupWMClass`** is
+  the application's name as it was given to `--app`, never the file's own: a shell that
+  matches windows by class would count another program's as this launcher's.
 - **`Exec` is `SECUREBOX enter NAME -- ` and then the box's words, each made only of
   letters, digits and `_@+=:,./-`.** The specification has a quoting syntax, and
   securebox does not implement it: i3's and others' launchers pass the line to `sh -c`, so
   a word that is safe under the specification's rules can still be a command under a
   shell's. A line with anything else in it is refused, not escaped. Field codes (`%f`,
   `%U`…) are dropped: they would carry host paths, which the box cannot open.
-- **`Name`** keeps letters, digits, spaces and `.-_+(),&:/!#`, at most 60 characters, and
-  always gets ` (on NAME)` appended: the box chooses what its launcher is called, and
-  must not be able to call it "Files". ASCII only, which also keeps out the Unicode
-  direction overrides a name could hide its ending with.
+- **`Name`** is `NAME: ` and then the box's own: letters, digits, single spaces and
+  `.-_+,&:/!#`, at most 40 characters. The box chooses what its launcher is called, and
+  must not be able to call it "Files". The box's name comes first because a menu cuts a
+  long name at its end, and there are no brackets because the first version's ending,
+  ` (on NAME)`, could be written by the box itself (`Files (on host)`). ASCII only, which
+  also keeps out letters that look like others and the Unicode direction overrides.
 - **`Icon`** is taken when it is a name (`[A-Za-z0-9_.-]+`), which the host's theme
   resolves, and dropped when it is a path. No image of the box's is copied to the host: it
   would be parsed by the desktop shell, the most privileged thing in the session, and the
   path form would point the shell at a host file of the box's choosing.
+- **Exports belong to a box, not to a name.** `create` removes what an earlier box of the
+  name left exported (after `podman rm`, or a `recreate` that failed), and says so;
+  `recreate` is the same box and keeps it.
+- **securebox must not be a file the box can write**: `export` refuses when its own path
+  is inside the box's home or a share of the box's.
 - **securebox's own path** goes into both files (from `/proc/self/exe`), since a desktop
   session's `PATH` often lacks `~/.local/bin`. It must be made of the same inert
   characters, or `export` refuses.
@@ -1036,6 +1069,26 @@ The second independent review, of the session grants and of the fixes above:
 | `WAYLAND_DISPLAY` could name anything (`pulse`, `../../../etc`), mounted read-write | hardening | it must resolve to a socket in the runtime directory; mounted read-only |
 | systemd expands `$` in a unit's command line; boxes `x` and `x.service` shared a unit; the data directory could be a link to the home; `/run/dbus` and `/run/systemd` could be shared | hardening | `$` refused where it would be expanded; units named in full; the resolved data directory is checked; all of `/run` but removable media refused |
 | The denylist of bus names suggested the others were safe | design | kept as a courtesy, and said to be one, in the message, the README and section 3 |
+
+The review of `recreate` and `export`, by a reader who had not seen their design
+discussion (read from the code; nothing was run):
+
+| Finding | Severity | What was done |
+|---|---|---|
+| `recreate` mounted shares that were checked while the old box still ran: a box with a read-write share around a new share could make it a link to `~/.ssh` during the stop | medium | shares are looked at again after the stop and before `podman create` |
+| A launcher's name could hide or imitate the ` (on NAME)` ending; `Categories=TerminalEmulator` and `StartupWMClass` were the box's to set | low | the box's name first, no brackets, 40 characters; main categories only; the window class is the application's name |
+| The 64 KB bound on a `.desktop` file was the box's own `head`; the box's standard error reached the terminal | low | in-box commands are read with a bound, a time limit and no standard error, on the host |
+| A new box under an old name took over the old one's exports | low | `create` removes them |
+| `recreate` found a missing session only after the box was removed; a new box that did not start was left behind a message saying there was none; the units outlived a failed commit | low | checked first; removed; stopped with the box |
+| A launcher's `enter` could start the old box again in the middle of `recreate` | low | a lock per box |
+| A missing snapshot image would be asked of a registry on `localhost` | hardening | `--pull=never` |
+| securebox run from inside a share could be replaced by the box under its launchers | hardening | `export` refuses |
+| `export` wrote through a dangling symbolic link, and `cmp` took a link to the same text for securebox's file | low | exclusive, no-follow creation; only a regular file is securebox's |
+
+Checked and found sound in that review: no character of the box's reaches a launcher or a
+script unchecked; names cannot traverse or become options; nothing `podman commit`
+carries gives a recreated box what a new one would not have (from the reviewer's reading
+of podman, not from a run); no grant survives a `recreate` that does not restate it.
 
 Left as it is, knowingly: the share check cannot stop a user who shares a directory and
 then replaces part of its path with a link while the box exists (the mount is fixed at

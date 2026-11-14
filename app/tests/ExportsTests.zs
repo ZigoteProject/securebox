@@ -55,23 +55,39 @@ let tests =
               = Ok (String.concat [
                       "[Desktop Entry]\n"
                       "Type=Application\n"
-                      "Name=Firefox (on dev)\n"
+                      "Name=dev: Firefox\n"
                       "Exec=/usr/local/bin/securebox enter dev -- firefox --name firefox\n"
                       "Icon=org.mozilla.firefox\n"
                       "Terminal=false\n"
-                      "Categories=Network;WebBrowser;\n"
-                      "StartupWMClass=firefox\n" ])))
+                      "Categories=Network;\n"
+                      "StartupWMClass=app\n" ])))
     test "only [Desktop Entry] is read, and of a key its first line" (fun () ->
       let text = String.join "\n" [ "[Desktop Action x]"; "Exec=evil"; "Name=Evil"; entry [ " Name = Good "; "Exec=good"; "Exec=evil" ]; "[Other]"; "Terminal=true"; "Icon=evil" ]
       assert (Exports.launcher "app" text = Ok { title = "Good"; exec = [ "good" ]; icon = ""; terminal = false; categories = []; windowClass = "app" }))
     test "what a file says beyond its command is taken a character at a time, or not at all" (fun () ->
       let made = Exports.launcher "app" (entry [ "Name=Files\\n; `id` $(x) \t[31m"; "Exec=app"; "Icon=/usr/share/icons/x.svg"; "Terminal=true"
                                                  "Categories=Utility;Bad Cat;;$(id);X-Own"; "StartupWMClass=a b" ])
-      assert (made = Ok { title = "Filesn id (x) 31m"; exec = [ "app" ]; icon = ""; terminal = true; categories = [ "Utility"; "X-Own" ]; windowClass = "app" })
+      assert (made = Ok { title = "Filesn id x 31m"; exec = [ "app" ]; icon = ""; terminal = true; categories = [ "Utility" ]; windowClass = "app" })
       // a name of nothing usable is the application's, and one that goes on is cut
       let long = Exports.launcher "app" (entry [ "Name=" + String.repeat 100 "a"; "Exec=app" ])
-      assert (Result.map (fun (l: Exports.Launcher) -> String.length l.title) long = Ok 60)
+      assert (Result.map (fun (l: Exports.Launcher) -> String.length l.title) long = Ok 40)
       assert (Result.map (fun (l: Exports.Launcher) -> l.title) (Exports.launcher "app" (entry [ "Name=$$$"; "Exec=app" ])) = Ok "app"))
+    test "a launcher cannot pass for an application of the host's" (fun () ->
+      let made (lines: list<string>) = Exports.launcher "app" (entry ("Exec=app" :: lines))
+      let title (lines: list<string>) = Result.map (fun (l: Exports.Launcher) -> l.title) (made lines)
+      // the box's name comes first, so no name is long enough to hide it, and none ends in a "(on ...)" of its own
+      assert (title [ "Name=Files (on host)" ] = Ok "Files on host")
+      assert (title [ "Name=Files" + String.repeat 50 " " + "." ] = Ok "Files .")
+      assert (Result.map (fun (l: Exports.Launcher) -> String.contains "\nName=dev: Files\n" (Exports.desktopFile self "dev" l)) (made [ "Name=Files" ]) = Ok true)
+      // letters are ASCII's: none that only looks like one of them (the second letter here is Cyrillic)
+      assert (title [ "Name=Fіles é" ] = Ok "Fles")
+      // a carriage return does not start a line that a desktop might read as a key, and is not kept
+      assert (title [ "Name=A\rB" ] = Ok "AB")
+      assert (title [ "Name=A\r\nName=evil" ] = Ok "A")
+      // the categories programs act on are not a box's to take: the host's terminal, for one
+      assert (Result.map (fun (l: Exports.Launcher) -> l.categories) (made [ "Categories=System;TerminalEmulator;X-GNOME-Utilities;WebBrowser;" ]) = Ok [ "System" ])
+      // nor another program's windows
+      assert (Result.map (fun (l: Exports.Launcher) -> l.windowClass) (made [ "StartupWMClass=firefox" ]) = Ok "app"))
     test "the words the desktop would fill in with the host's files are dropped" (fun () ->
       assert (Result.map (fun (l: Exports.Launcher) -> l.exec) (Exports.launcher "app" (entry [ "Exec=env A=1 /opt/app/run  --open %F %i %c" ]))
               = Ok [ "env"; "A=1"; "/opt/app/run"; "--open" ]))
