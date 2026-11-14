@@ -201,7 +201,14 @@ let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<in
   let _ = started?
   Ok (Host.exec (execArgs ctx name root (sessionEnv ctx state) (workdir ctx (shares ctx state)) cmd))
 
-let list () : result<int, string> = Ok (Host.exec listArgs)
+let list (uid: int) : result<int, string> =
+  let boxes = (podman listArgs "podman could not list the boxes")?
+  let names = listed boxes
+  // ps says where things are mounted; whether that is a grant takes the mounts themselves
+  let mounts = if names = [] then "" else Result.defaultValue "" (podman (listMountsArgs names) "")
+  let table = (listing (withBus uid mounts) boxes)?
+  Host.out table
+  Ok 0
 
 let stop (ctx: Ctx) (name: string) : result<int, string> =
   let state = (find ctx name)?

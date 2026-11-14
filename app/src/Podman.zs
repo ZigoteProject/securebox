@@ -94,9 +94,8 @@ let inspectArgs (name: string) =
     "{{.Name}}|{{.State.Status}}|{{json (index .Config.Labels \"securebox\")}}{{\"\\n\"}}{{json .Mounts}}"
     name ]
 
-/// Reads `inspectArgs`' output: `dev|running|"1"`, then the mounts as a JSON array, of which
-/// the binds are kept.
-let parseInspect (output: string) : BoxState =
+/// The bind mounts in podman's JSON of a container's mounts, as source and destination.
+let private binds (line: string) : list<string * string> =
   let text (key: string) (fields: list<string * Json>) =
     match List.tryFind (fun (k, _) -> k = key) fields with
     | Some (_, JString s) -> Some s
@@ -108,10 +107,13 @@ let parseInspect (output: string) : BoxState =
       | (Some "bind", Some source, Some destination) -> Some (source, destination)
       | _ -> None
     | _ -> None
-  let binds (line: string) =
-    match Json.parse line with
-    | Ok (JArray mounts) -> List.choose bind mounts
-    | _ -> []
+  match Json.parse line with
+  | Ok (JArray mounts) -> List.choose bind mounts
+  | _ -> []
+
+/// Reads `inspectArgs`' output: `dev|running|"1"`, then the mounts as a JSON array, of which
+/// the binds are kept.
+let parseInspect (output: string) : BoxState =
   match String.splitLines (String.trim output) with
   | first :: rest ->
     match String.split "|" first with
@@ -190,9 +192,89 @@ let rmArgs (name: string) = [ "rm"; "--force"; "--volumes"; name ]
 /// owned by a subordinate uid there, which the user alone cannot remove.
 let purgeArgs (ctx: Ctx) (name: string) = [ "unshare"; "rm"; "-rf"; "--"; boxDir ctx name ]
 
-let listArgs =
-  [ "ps"; "--all"; "--filter"; "label=securebox=1"; "--format"
-    "table {{.Names}}\t{{.State}}\t{{.Image}}\t{{.Mounts}}\t{{.Networks}}\t{{.Ports}}" ]
+let listArgs = [ "ps"; "--all"; "--filter"; "label=securebox=1"; "--format"; "json" ]
+
+/// The mounts of the containers `list` shows, a line each: `ps` tells where things are
+/// mounted, not what they are.
+let listMountsArgs (names: list<string>) =
+  List.append [ "container"; "inspect"; "--format"; "{{.Name}}|{{json .Mounts}}" ] names
+
+/// The containers `listArgs` found, by name.
+let listed (output: string) : list<string> =
+  match Json.parse (if String.trim output = "" then "[]" else output) with
+  | Ok (JArray boxes) ->
+    List.collect (fun box ->
+      match box with
+      | JObject b ->
+        match List.tryFind (fun (k, _) -> k = "Names") b with
+        | Some (_, JArray names) -> List.choose (fun n -> match n with
+                                                          | JString s -> Some s
+                                                          | _ -> None) names
+        | _ -> []
+      | _ -> []) boxes
+  | _ -> []
+
+/// Of those, the ones created with `--dbus`: securebox's directory for the filter is bound
+/// where the bus goes. A volume an image declares there is not a bind.
+let withBus (uid: int) (mounts: string) : list<string> =
+  String.splitLines mounts |> List.choose (fun line ->
+    match String.indexOf "|" line with
+    | Some i ->
+      let name = String.sub line 0 i
+      let bound = binds (String.sub line (i + 1) (String.length line - i - 1))
+      let ours (source: string, destination: string) =
+        destination = $"/run/user/{uid}/dbus" && String.endsWith $"/securebox/{name}/dbus" source
+      if List.exists ours bound then Some name else None
+    | None -> None)
+
+/// The table `list` prints, from `listArgs`' output: for each box its state, its image, and
+/// its grants as podman has them: what is mounted, its network, its ports, and the names on
+/// the session bus it may talk to. The names are shown only for the boxes in `granted`
+/// (`withBus`), so a label an image carries is not listed as a grant. Control characters
+/// are not printed.
+let listing (granted: list<string>) (output: string) : result<string, string> =
+  let field (key: string) (fields: list<string * Json>) = List.tryFind (fun (k, _) -> k = key) fields |> Option.map snd
+  let text (j: option<Json>) =
+    match j with
+    | Some (JString s) -> s
+    | Some (JInt n) -> $"{n}"
+    | Some (JUInt n) -> $"{n}"
+    | _ -> ""
+  let texts (j: option<Json>) =
+    match j with
+    | Some (JArray items) -> List.map (fun item -> text (Some item)) items
+    | _ -> []
+  let port (j: Json) =
+    match j with
+    | JObject p ->
+      let ip = text (field "host_ip" p)
+      (if ip = "" then "0.0.0.0" else ip) + ":" + text (field "host_port" p) + "->" + text (field "container_port" p) + "/" + text (field "protocol" p)
+    | _ -> ""
+  let clean (s: string) = String.ofChars (List.map (fun c -> if int c < 32 || int c = 127 then '?' else c) (String.chars s))
+  let row (box: Json) =
+    match box with
+    | JObject b ->
+      let mounts = texts (field "Mounts" b)
+      let ports =
+        match field "Ports" b with
+        | Some (JArray ps) -> List.map port ps
+        | _ -> []
+      let named = texts (field "Names" b)
+      let names =
+        match field "Labels" b with
+        | Some (JObject labels) when List.exists (fun n -> List.contains n granted) named -> text (field "securebox.dbus" labels)
+        | _ -> ""
+      Some (List.map clean [ String.join "," named; text (field "State" b); text (field "Image" b)
+                             String.join " " mounts; String.join "," (texts (field "Networks" b)); String.join " " ports; names ])
+    | _ -> None
+  match Json.parse (if String.trim output = "" then "[]" else output) with
+  | Ok (JArray boxes) ->
+    let rows = [ "NAME"; "STATE"; "IMAGE"; "MOUNTS"; "NETWORKS"; "PORTS"; "DBUS" ] :: List.choose row boxes
+    let width (i: int) = List.fold (fun w (r: list<string>) -> max w (String.length (List.item i r))) 0 rows
+    let widths = List.init 7 width
+    let line (r: list<string>) = String.trimEnd (String.join "  " (List.map2 (fun w cell -> String.padRight w cell) widths r))
+    Ok (String.concat (List.map (fun r -> line r + "\n") rows))
+  | _ -> Error "podman's list of containers could not be read"
 
 /// The box's own shell: the user's, when the box has it, then bash, then sh.
 let private shellCommand (shell: string) =

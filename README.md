@@ -164,8 +164,8 @@ cp build/securebox ~/.local/bin/
 ## Testing
 
 ```sh
-zs test            # 156 unit tests: validation, the exact podman arguments, the command flows
-tests/e2e.sh       # 250 checks with real podman, on Fedora, Ubuntu and Alpine images
+zs test            # 158 unit tests: validation, the exact podman arguments, the command flows
+tests/e2e.sh       # 253 checks with real podman, on Fedora, Ubuntu and Alpine images
 ```
 
 The end-to-end script creates boxes named `sbx-e2e-<pid>-*`, keeps their data in a

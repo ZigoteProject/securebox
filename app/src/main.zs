@@ -103,7 +103,7 @@ let private named (command: string) (names: list<string>) : result<string, strin
 
 let private run (cmd: Cli.Command) : result<int, string> =
   match cmd with
-  | Cli.List -> Commands.list ()
+  | Cli.List -> Commands.list (Posix.userId ())
   | Cli.Create args ->
     let ctx = (context ())?
     let spec = (createSpec ctx { name = ""; image = Box.defaultImage } args)?

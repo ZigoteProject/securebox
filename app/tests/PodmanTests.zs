@@ -260,6 +260,42 @@ let tests =
       // the socket named the same on both sides is still not a share
       let same = parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev; ("/run/user/1000/wayland-0", "/run/user/1000/wayland-0") ])
       assert (shares ctx same = []))
+    test "list: a table of the boxes and their grants, D-Bus names included" (fun () ->
+      let boxes =
+        String.concat [
+          "[{\"Names\":[\"web\"],\"State\":\"running\",\"Image\":\"docker.io/library/ubuntu:24.04\","
+          "\"Mounts\":[\"/home/ada\",\"/home/ada/Projects/web\"],\"Networks\":[],"
+          "\"Ports\":[{\"host_ip\":\"127.0.0.1\",\"container_port\":80,\"host_port\":8080,\"range\":1,\"protocol\":\"tcp\"}],"
+          "\"Labels\":{\"securebox\":\"1\"}},"
+          "{\"Names\":[\"gui\"],\"State\":\"exited\",\"Image\":\"fedora:45\","
+          "\"Mounts\":[\"/home/ada\",\"/run/user/1000\",\"/run/user/1000/dbus\"],\"Networks\":[],\"Ports\":null,"
+          "\"Labels\":{\"securebox\":\"1\",\"securebox.dbus\":\"org.freedesktop.Notifications,org.example.App\"}},"
+          // an image that carries the label, in a box without the grant; and a name with an escape in it
+          "{\"Names\":[\"odd\"],\"State\":\"created\",\"Image\":\"evil\\u001b[2Jimage\","
+          "\"Mounts\":[\"/home/ada\"],\"Networks\":[\"host\"],\"Ports\":[],"
+          "\"Labels\":{\"securebox\":\"1\",\"securebox.dbus\":\"org.freedesktop.secrets\"}}]" ]
+      assert (listed boxes = [ "web"; "gui"; "odd" ] && listed "" = [] && listed "junk" = [])
+      // what `container inspect` says of their mounts: gui has securebox's directory bound where
+      // the bus goes; odd has a volume its image declared there
+      let mounts =
+        String.concat [
+          "web|[{\"Type\":\"bind\",\"Source\":\"/d/web/home\",\"Destination\":\"/home/ada\"}]\n"
+          "gui|[{\"Type\":\"bind\",\"Source\":\"/run/user/1000/securebox/gui/dbus\",\"Destination\":\"/run/user/1000/dbus\"}]\n"
+          "odd|[{\"Type\":\"volume\",\"Source\":\"/v/_data\",\"Destination\":\"/run/user/1000/dbus\"}]\n"
+          "other|[{\"Type\":\"bind\",\"Source\":\"/run/user/1000/securebox/gui/dbus\",\"Destination\":\"/run/user/1000/dbus\"}]\n" ]
+      assert (withBus 1000 mounts = [ "gui" ] && withBus 1000 "" = [])
+      expect (Result.defaultValue "?" (listing [ "gui" ] boxes)) """
+        NAME  STATE    IMAGE                           MOUNTS                                        NETWORKS  PORTS                   DBUS
+        web   running  docker.io/library/ubuntu:24.04  /home/ada /home/ada/Projects/web                        127.0.0.1:8080->80/tcp
+        gui   exited   fedora:45                       /home/ada /run/user/1000 /run/user/1000/dbus                                    org.freedesktop.Notifications,org.example.App
+        odd   created  evil?[2Jimage                   /home/ada                                     host
+
+        """
+      expect (Result.defaultValue "?" (listing [] "[]")) """
+        NAME  STATE  IMAGE  MOUNTS  NETWORKS  PORTS  DBUS
+
+        """
+      assert (Result.isError (listing [] "not json")))
     test "the working directory maps only into a share" (fun () ->
       assert (workdir ctx [ "/home/ada/Projects/web" ] = "/home/ada/Projects/web/src")
       assert (workdir ctx [ "/home/ada/Projects/web/src" ] = "/home/ada/Projects/web/src")

@@ -25,6 +25,8 @@ effect Host =
   abstract awaitPath : string -> bool
   /// A line for the user.
   abstract say : string -> unit
+  /// What a command prints: text for standard output.
+  abstract out : string -> unit
 
 let rec private createAll (path: string) : result<unit, string> =
   if Directory.exists path then Ok ()
@@ -67,4 +69,7 @@ let real (app: unit -> 'a) =
   | Host.awaitPath path, k -> k (appears path 60)
   | Host.say line, k ->
     eprintln line
+    k ()
+  | Host.out text, k ->
+    print text
     k ()

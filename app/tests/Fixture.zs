@@ -52,6 +52,9 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
       k (Ok ())
     | Host.awaitPath _, k -> k true
     | Host.say _, k -> k ()
+    | Host.out text, k ->
+      calls <- ("out " + text) :: calls
+      k ()
   (result, List.rev calls)
 
 /// What `podman inspect` prints for a container, as `Podman.inspectArgs` asks for it:

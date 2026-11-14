@@ -1,8 +1,8 @@
 # securebox — design
 
 Status: 2026-11-14. Implemented: the five commands and the `--share`, `--share-ro`,
-`--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants, with 156 unit
-tests and an end-to-end script of 250 checks against real podman. The code has had a correctness review
+`--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants, with 158 unit
+tests and an end-to-end script of 253 checks against real podman. The code has had a correctness review
 and an independent security review; appendix D lists what they found and what was done.
 
 securebox gives you a persistent, interactive Linux box from any container image, the way
@@ -119,9 +119,8 @@ and starts the container's `/etc/hosts` from the host's.
 ### Grants
 
 All off by default, all given at `create`, all visible in `securebox list` (which prints
-podman's own mount and network columns, so the listing cannot drift from reality). The
-one thing it does not show is which names a `--dbus` box was granted; that is the label
-`securebox.dbus`, in `podman inspect`.
+what podman itself reports for each box, so the listing cannot drift from reality: its
+mounts, networks and ports, and the names a `--dbus` box was granted).
 
 | Flag | Grants |
 |---|---|
@@ -366,14 +365,21 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
 ### list, stop, rm
 
 ```text
-podman ps --all --filter label=securebox=1 --format 'table {{.Names}}\t{{.State}}\t{{.Image}}\t{{.Mounts}}\t{{.Networks}}\t{{.Ports}}'
+podman ps --all --filter label=securebox=1 --format json
+podman container inspect --format '{{.Name}}|{{json .Mounts}}' NAME…     # list: what is mounted
 podman stop NAME
 podman rm --force --volumes NAME          # with the anonymous volumes its image declared
 podman unshare rm -rf -- DATA/NAME        # with --purge only
 ```
 
-`list` is an `exec` of `podman ps`, so there is no output parsing at all; it needs nothing
-from the environment. `rm` keeps the home directory and prints its path; deleting user
+`list` reads that JSON and prints its own table: NAME, STATE, IMAGE, MOUNTS, NETWORKS,
+PORTS and DBUS. (podman's table format cannot print a label, which is where a `--dbus`
+box's names are.) The names are shown only for a box that has securebox's directory bound
+where the bus goes. `ps` reports where things are mounted and not what they are, and the
+first version went by that: a box from an image declaring a volume there, with the label,
+was listed with the image's names. So `list` asks for the mounts themselves, in one more
+call. Control characters are replaced, so a name or a label cannot write escape sequences
+to the terminal. It needs nothing from the environment but the uid. `rm` keeps the home directory and prints its path; deleting user
 data takes the explicit `--purge`. The purge runs inside podman's user namespace because
 files the box's root made in the home belong to a subordinate uid, which the user alone
 cannot delete. `rm NAME --purge` also works after the container is gone, but only when
@@ -478,7 +484,8 @@ effect Host =
   abstract writeFile  : string * string -> result<unit, string>        // the sound front-end's
   abstract copyFile   : string * string -> result<unit, string>        //   configuration
   abstract awaitPath  : string -> bool                                 // a unit's socket
-  abstract say        : string -> unit                                 // a line for the user
+  abstract say        : string -> unit                                 // a line for the user, on stderr
+  abstract out        : string -> unit                                 // list's table, on stdout
 ```
 
 Tests handle `Host` with a recorder (`app/tests/Fixture.zs`), which makes the flows
@@ -492,7 +499,7 @@ effect's operation.)
 **Running podman.** Calls that are followed by more work (`inspect`, `create`, `start`,
 `stop`, `rm`) go through `Process.run`: standard output is captured, so podman's chatter
 (the container's id or name) never mixes into a command's output, and its errors still
-reach the terminal. The last call of `enter` and of `list` is an `execvp`: securebox is
+reach the terminal. The last call of `enter` is an `execvp`: securebox is
 replaced by podman, so there is no parent process left to forward signals, relay the
 terminal or pass the exit code on. In the real handler `Host.exec` returns only when
 podman could not be started.
@@ -639,13 +646,13 @@ cd app && zs build --release --target x86_64-linux-musl     # the static binary
 
 ## 9. Testing
 
-- **Unit (`zs test`, 156 tests):** validation tables and a property test (no accepted name
+- **Unit (`zs test`, 158 tests):** validation tables and a property test (no accepted name
   starts with `-` or contains `/`); `expect` tests of `createArgs` and `execArgs`, which
   pin the security flags, and a test that labelling is never off without a session grant; the
   ownership check against an image's label, another data directory and an id prefix; the
   command flows under the recording `Host` handler; argz parse tables and `expect` tests
   of usage text; the posix functions.
-- **End to end (`tests/e2e.sh`, 250 checks):** the built binary against real podman, on
+- **End to end (`tests/e2e.sh`, 253 checks):** the built binary against real podman, on
   Fedora, Ubuntu and Alpine images: every row of section 3's table probed from inside the
   box, shares, exit codes, the lifecycle, the grants (the session grants included, where
   the session has a compositor, a sound server and a bus), refusals, and containers that are not securebox's. It keeps its
@@ -682,8 +689,9 @@ that cannot work. The first version of the script had no such control and could 
 6. **`--wayland` boxes and the compositor.** The socket is mounted when the box starts.
    Such a box cannot be started without a compositor running (`enter` says so), and after
    logging out and in it has the old socket until `securebox stop NAME` and a new `enter`.
-7. **`list` trusts the label.** It is `podman ps` filtered by label, so a container made
-   from an image that carries `LABEL securebox=1` shows up in it. No command acts on one.
+7. **`list` trusts the label for its rows.** It is `podman ps` filtered by label, so a
+   container made from an image that carries `LABEL securebox=1` shows up in it. No
+   command acts on one, and no D-Bus names are shown for it.
 8. **No portals** in any box, and no bus name can be owned on the session bus.
 9. **A filter's names are fixed at create,** like every grant.
 
@@ -752,7 +760,7 @@ What Z# 0.7.1 does that the design had to follow, for whoever writes M1:
 ## Appendix C: end-to-end results
 
 `tests/e2e.sh` on podman 6.1.3 (rootless, crun, pasta, SELinux enforcing, a GNOME Wayland
-session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 250 passed,
+session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 253 passed,
 0 failed.
 
 Per image: the home starts empty; the uid, `HOME` and passwd entry; zero capabilities,

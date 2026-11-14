@@ -265,6 +265,7 @@ if command -v xdg-dbus-proxy >/dev/null && command -v busctl >/dev/null && [ -n 
   is "$t --dbus: create" 0 $?
   is "$t --dbus: the filter runs as a unit of the user's" "active" "$(systemctl --user is-active "$unit" 2>&1)"
   is "$t --dbus: the box is told where the filtered bus is" "socket" "$(box 'test -S "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" && echo socket')"
+  has "$t --dbus: list shows the names granted" "org.freedesktop.Notifications,org.gtk.Notifications" "$("$SB" list 2>/dev/null | grep "^$name ")"
   is "$t --dbus: the session bus itself is not in the box" "absent" "$(box 'ls -d /run/user/*/bus 2>/dev/null || echo absent')"
   if [ "$(box 'command -v curl >/dev/null && echo yes')" = yes ]; then
     box 'curl -s -m 3 --unix-socket "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" http://x/ >/dev/null 2>&1; [ $? -ne 7 ]'
@@ -410,6 +411,7 @@ boxes+=("$name")
 "$SB" create "$name" "$hostile" >/dev/null 2>&1
 is "$t create" 0 $?
 is "$t the box is told of no bus and no sound server" "unset" "$(box 'echo "${DBUS_SESSION_BUS_ADDRESS-unset}${PULSE_SERVER+set}${XDG_RUNTIME_DIR+set}"')"
+hasnt "$t list shows no D-Bus names for it" "org.freedesktop.secrets" "$("$SB" list 2>/dev/null)"
 is "$t no filter was started for it" "inactive" "$(systemctl --user is-active "securebox-dbus-$name" 2>&1)"
 is "$t no sound front-end was started for it" "inactive" "$(systemctl --user is-active "securebox-sound-$name" 2>&1)"
 "$SB" rm "$name" --purge >/dev/null 2>&1
@@ -423,6 +425,7 @@ mkdir -p "$SECUREBOX_DATA/stray"
 is "$t a directory that was never a box is not purged" "125 yes" "$? $([ -d "$SECUREBOX_DATA/stray" ] && echo yes || echo no)"
 
 t="[cli]"
+has "$t list has a column for D-Bus names" "DBUS" "$("$SB" list 2>/dev/null | head -1)"
 has "$t --help lists the commands" "create" "$("$SB" --help)"
 has "$t a command's --help lists its options" "--share-ro" "$("$SB" create --help)"
 is "$t a command without arguments has its own help" "usage: securebox list [options]" "$("$SB" list --help | head -1)"

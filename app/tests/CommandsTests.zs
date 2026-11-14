@@ -73,6 +73,14 @@ let tests =
       let (r, calls) = record broken [ dir; dir + "/home" ] (fun () -> Commands.rm ctx "dev" true)
       assert (r = Error "podman could not inspect 'dev'")
       assert (not (ran "podman unshare" calls) && not (ran "podman rm" calls)))
+    test "list prints the table, to standard output" (fun () ->
+      let boxes (args: list<string>) : ProcessResult = { code = 0; output = "[{\"Names\":[\"dev\"],\"State\":\"running\",\"Image\":\"fedora:45\",\"Mounts\":[\"/home/ada\"]}]" }
+      let (r, calls) = record boxes [] (fun () -> Commands.list 1000)
+      assert (r = Ok 0 && steps calls = [ "ps"; "container"; "NAME" ])
+      assert (List.item 1 calls = "podman container inspect --format {{.Name}}|{{json .Mounts}} dev")
+      assert (String.contains "\ndev   running  fedora:45  /home/ada\n" (List.last calls))
+      let failing (args: list<string>) : ProcessResult = { code = 125; output = "" }
+      assert (Result.isError (fst (record failing [] (fun () -> Commands.list 1000)))))
     test "stop: only a running box is stopped" (fun () ->
       let (_, running) = record (dev "running" []) [] (fun () -> Commands.stop ctx "dev")
       let (_, stopped) = record (dev "exited" []) [] (fun () -> Commands.stop ctx "dev")
