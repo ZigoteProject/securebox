@@ -772,10 +772,38 @@ cd app && zs build --release --target x86_64-linux-musl     # the static binary
   a little less for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
   arguments takes about half a millisecond. Two builds of one commit are the same bytes.
 - A release is made by hand, there is no CI: set the version in `app/zs.toml`,
-  `Cli.version`, the README's install lines and `CHANGELOG.md`, run `zs test`, build the
-  static binary, run `tests/e2e.sh` with `SECUREBOX` set to it, tag `vX.Y.Z`, and attach
-  `securebox-X.Y.Z-x86_64-linux.tar.gz` (the binary, `LICENSE`, `README.md`) and
-  `SHA256SUMS` to the GitHub release. arm64 is not shipped until it has been run on one.
+  `Cli.version`, the README's install lines and `CHANGELOG.md`, commit, and run
+  `tools/release.sh`. It checks those four agree, runs `zs test`, builds the static
+  binary, runs `tests/e2e.sh` against it, and makes
+  `securebox-X.Y.Z-x86_64-linux.tar.gz` (the binary, `LICENSE`, `README.md`),
+  `SHA256SUMS` and `SHA256SUMS.sig` in `build/release/`. Tag `vX.Y.Z` and attach the
+  three to the GitHub release. arm64 is not shipped until it has been run on one.
+- **Releases are signed**, because a checksum that is downloaded beside an archive says
+  only that the download was not cut short: whoever can replace one can replace both.
+  `SHA256SUMS.sig` is an SSH signature (`ssh-keygen -Y sign`, namespace
+  `securebox-release`) of `SHA256SUMS`. SSH rather than GPG or minisign because the
+  verifier is already on the machines securebox runs on, and the format has no keyring
+  and no web of trust to explain. `release-signers` in the repository is the
+  allowed-signers file a user verifies against, and the key in it is allowed for that
+  namespace alone, so a signature it made for anything else is not one of a release.
+  `tools/release.sh` signs a probe and verifies it against that file before it builds
+  anything: a release cannot be made with a key that users would not accept.
+- The release key is made once, kept off the build machine's disk where that is possible
+  (a hardware key through `ssh-agent` works: `SECUREBOX_SIGNING_KEY` may be the public
+  half), and its public half committed:
+
+  ```sh
+  ssh-keygen -t ed25519 -C securebox-release -f ~/.ssh/securebox-release
+  printf 'securebox-release namespaces="securebox-release" %s\n' \
+    "$(cut -d' ' -f1,2 ~/.ssh/securebox-release.pub)" > release-signers
+  ```
+
+  What this does not give: a user's first copy of `release-signers` comes from the same
+  repository as the release, so the signature protects a release's files and every later
+  release, not the first act of trust. A replacement key is added as a second line, and
+  the old line stays for the releases it signed.
+- The archive is the same bytes from the same commit (sorted, owner 0, the commit's time,
+  no gzip timestamp), so a signed release can be checked against a build of one's own.
 - Build needs: Z# 0.7.1 (`.toolchain/`, not committed), clang 23+, zig.
 - Runtime needs: podman 5.3 or later (`--hosts-file`), with pasta, its rootless network
   since 5.0. Developed and tested on 6.1 only. No version probe at run time.

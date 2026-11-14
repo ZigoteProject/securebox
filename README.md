@@ -37,6 +37,22 @@ install -Dm 755 "securebox-$v-x86_64-linux/securebox" ~/.local/bin/securebox
 securebox --version
 ```
 
+Releases after 0.2.0 are signed. `SHA256SUMS.sig` is an SSH signature of `SHA256SUMS`, made
+with the key in [`release-signers`](release-signers); check it before the checksum, with
+the `ssh-keygen` of OpenSSH 8.1 or later:
+
+```sh
+curl -fsSLO "https://github.com/ZigoteProject/securebox/releases/download/v$v/SHA256SUMS.sig"
+curl -fsSLO "https://raw.githubusercontent.com/ZigoteProject/securebox/main/release-signers"
+ssh-keygen -Y verify -f release-signers -I securebox-release -n securebox-release \
+  -s SHA256SUMS.sig < SHA256SUMS
+```
+
+That says the files are the ones the holder of that key released, which a checksum
+downloaded beside them does not. The key itself comes from the same repository: keep
+`release-signers` from your first download, and a later release that does not verify
+against it is one to ask about.
+
 It needs rootless podman 5.3 or later. For arm64, or from source, see [Building](#building).
 [CHANGELOG.md](CHANGELOG.md) has what each release changed.
 
@@ -271,6 +287,8 @@ app/               the securebox binary: Cli, Box (validation), Podman (argument
 packages/argz/     an Argu-style argument parser for Z#: a union is the command line
 packages/posix/    exec, realpath, user ids, isatty, chmod, exclusive file creation: all of the project's C (100 lines)
 tests/e2e.sh       the end-to-end tests
+tools/release.sh   a release's files, built, tested and signed
+release-signers    the key releases are signed with
 DESIGN.md          the design: threat model, the podman command lines, what was verified
 ```
 

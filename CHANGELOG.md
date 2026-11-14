@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Releases are signed: `SHA256SUMS.sig` is an SSH signature of `SHA256SUMS`, verified
+  against `release-signers` with `ssh-keygen -Y verify`. `tools/release.sh` makes a
+  release's files, and refuses a key that is not in that file.
 - `export` no longer writes through a symbolic link where a script or a launcher goes. A
   file is created anew (`O_EXCL`, `O_NOFOLLOW`), anything else at the path is left alone
   and reported, and a link is never taken for a file securebox wrote, by `export`,
