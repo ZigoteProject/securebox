@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `recreate` (and `create`) check each share again just before the box is made. A box
+  with a read-write share could replace a directory inside it with a link while
+  `recreate` was narrowing the share to that directory, and the link's target was
+  mounted. Found by the review of `recreate` and `export`.
 - Releases are signed: `SHA256SUMS.sig` is an SSH signature of `SHA256SUMS`, verified
   against `release-signers` with `ssh-keygen -Y verify`. `tools/release.sh` makes a
   release's files, and refuses a key that is not in that file.

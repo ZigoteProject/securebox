@@ -150,6 +150,16 @@ let private unchanged (ctx: Ctx) (path: string) : result<unit, string> =
   if now = path && Result.isOk (sharePath ctx path) then Ok ()
   else Error $"the shared directory '{path}' is not what it was when the box was created (it is now '{now}'): the box is not started. Remove the box and create it again"
 
+/// Whether the shares asked for are still the directories that were checked when the
+/// command line was read. Between that and `podman create`, which resolves each path
+/// again, a running box with a read-write share around one of them can put a link there:
+/// `recreate` narrowing a box's share to a directory inside it is that case.
+let private settled (ctx: Ctx) (shares: list<Share>) : result<unit, string> =
+  let moved (s: Share) = Host.realPath s.path <> s.path || Result.isError (sharePath ctx s.path)
+  match List.tryFind moved shares with
+  | Some s -> Error $"the shared directory '{s.path}' changed while the box was being made (it is now '{Host.realPath s.path}'): it is not shared, and no box is created"
+  | None -> Ok ()
+
 /// What is wrong with a set of grants whatever the host has: checked before anything is
 /// touched.
 let private coherent (spec: CreateSpec) : result<unit, string> =
@@ -175,6 +185,8 @@ let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
       result {
         let! _ = if spec.dbus = [] then Ok () else filtered ctx true spec.name (fun () -> Ok spec.dbus)
         let! _ = if spec.sound then fronted ctx true spec.name else Ok ()
+        // last, with no box of this name left to move a share: `recreate` has removed it
+        let! _ = settled ctx spec.shares
         let! _ = podman (createArgs ctx spec) $"podman could not create the box '{spec.name}'"
         let! _ = podman (startArgs spec.name) $"the box '{spec.name}' was created but did not start"
         return! settle ctx spec.name
@@ -360,6 +372,9 @@ let recreate (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
   let _ = (coherent spec)?
   let state = (find ctx name)?
   let _ = (if state.running then podman (stopArgs name) $"the box '{name}' did not stop" else Ok "")?
+  // the box could move a share until here; found now, it costs nothing: the box is as it
+  // was, stopped. `create` looks once more, when the box is gone
+  let _ = (settled ctx spec.shares)?
   // ponytail: each recreate adds a layer to the image; commit with --squash if a box is
   // ever recreated by the hundred
   let _ = (podman (commitArgs name) $"the files of the box '{name}' could not be kept as an image: the box is as it was, stopped")?

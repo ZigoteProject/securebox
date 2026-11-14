@@ -263,6 +263,12 @@ committed to an image, removed, and created from that image with the grants now 
   convenient design, and it is the one both reviews found holes in (a grant recognised by
   where something is mounted; a label an image can carry). What the user types is the only
   source of a grant, and forgetting one fails safe.
+- **A share is looked at again once the box is stopped, and again once it is removed.**
+  The paths were resolved and checked while the old box ran, and podman resolves them
+  again at `create`: a box with `--share ~/work`, being narrowed to `--share-ro
+  ~/work/proj`, could have made `proj` a link to `~/.ssh` in between (it can even see the
+  stop coming, as a pending signal). A share that is no longer the directory that was
+  checked fails the command, the first time with the box intact.
 - **Nothing is touched until the request is known to be coherent**, and the box is removed
   only after its files are in the image. If the new box then cannot be made, the error
   names the image and the `create` that brings the box back. The home directory is not

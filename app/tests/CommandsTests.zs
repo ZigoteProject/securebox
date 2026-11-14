@@ -260,6 +260,15 @@ let tests =
       assert (steps calls = [ "inspect"; "stop"; "commit"; "rm"; "inspect"; "container"; $"{dir}/home"; "create"; "start"; "exec"; $"{dir}/created" ])
       assert (List.item 2 calls = $"podman commit --quiet dev {snapshot}")
       assert (List.exists (String.endsWith $",ro --workdir /home/ada --network none {snapshot}") calls))
+    test "recreate: a share the box turned into a link while it ran is not mounted, and the box is kept" (fun () ->
+      // to-web is a link: what main resolved to a directory no longer is one
+      let spec = { name = "dev"; image = ""; shares = [ { path = "/srv/to-web"; readOnly = true } ] }
+      let (r, calls) = record (recreating "") [ share ] (fun () -> Commands.recreate ctx spec)
+      assert (Result.isError r && steps calls = [ "inspect"; "stop" ]))
+    test "create: a share that is no longer the directory it was is not mounted" (fun () ->
+      let spec = { name = "dev"; image = "fedora:45"; shares = [ { path = "/srv/to-web"; readOnly = false } ] }
+      let (r, calls) = record (box "") [ share ] (fun () -> Commands.create ctx spec)
+      assert (Result.isError r && not (ran "podman create" calls)))
     test "recreate: grants that cannot go together, and a box that isn't there, touch nothing" (fun () ->
       let (r, calls) = record (recreating "") pipewire (fun () -> Commands.recreate ctx { name = "dev"; image = ""; network = HostNetwork; sound = true })
       assert (Result.isError r && calls = [])
