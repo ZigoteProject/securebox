@@ -59,3 +59,10 @@ const char *posix_user_home(void) {
   struct passwd *pw = getpwuid(getuid());
   return pw && pw->pw_dir ? pw->pw_dir : "";
 }
+
+// Whether the path is a socket (after following symbolic links).
+#include <sys/stat.h>
+int32_t posix_is_socket(const char *path) {
+  struct stat st;
+  return stat(path, &st) == 0 && S_ISSOCK(st.st_mode);
+}

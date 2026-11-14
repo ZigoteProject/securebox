@@ -86,7 +86,7 @@ let tests =
       expect (lines (List.filter (fun a -> not (List.contains a plain)) wayland)) """
         label=disable
         type=tmpfs,dst=/run/user/1000,tmpfs-mode=0700,chown=true
-        type=bind,src=/run/user/1000/wayland-1,dst=/run/user/1000/wayland-0
+        type=bind,src=/run/user/1000/wayland-1,dst=/run/user/1000/wayland-0,ro
         """)
     test "create --sound: the front-end's directory, read-only; never the session's own socket" (fun () ->
       let plain = createArgs ctx { name = "gui"; image = "fedora:45" }
@@ -111,7 +111,7 @@ let tests =
         --quiet
         --collect
         --unit
-        securebox-sound-gui
+        securebox-sound-gui.service
         --setenv
         PIPEWIRE_CONFIG_DIR=/run/user/1000/securebox/gui/sound
         --setenv
@@ -129,20 +129,24 @@ let tests =
         type=bind,src=/run/user/1000/securebox/gui/dbus,dst=/run/user/1000/dbus,ro
         """
       assert (not (List.exists (String.contains "/run/user/1000/bus") dbus)))
-    test "the D-Bus filter: only the names granted are let through" (fun () ->
+    test "the D-Bus filter: for each name, the interface of that name and nothing else its owner has" (fun () ->
       expect (lines (proxyStartArgs ctx "gui" [ "org.freedesktop.Notifications"; "org.example.App" ])) """
         --user
         --quiet
         --collect
         --unit
-        securebox-dbus-gui
+        securebox-dbus-gui.service
         --
         xdg-dbus-proxy
         unix:path=/run/user/1000/bus
         /run/user/1000/securebox/gui/dbus/bus
         --filter
-        --talk=org.freedesktop.Notifications
-        --talk=org.example.App
+        --see=org.freedesktop.Notifications
+        --call=org.freedesktop.Notifications=org.freedesktop.Notifications.*
+        --broadcast=org.freedesktop.Notifications=org.freedesktop.Notifications.*
+        --see=org.example.App
+        --call=org.example.App=org.example.App.*
+        --broadcast=org.example.App=org.example.App.*
         """)
     test "labelling is never off without a session grant" (fun () ->
       let every = createArgs ctx { name = "web"; image = "x"; shares = [ { path = "/srv/data"; readOnly = false } ]
@@ -210,27 +214,36 @@ let tests =
       assert (String.contains "--env XDG_RUNTIME_DIR=/run/user/1000 --env WAYLAND_DISPLAY=wayland-0 " (String.join " " told)))
     test "a grant is securebox's own directory bound in place, not whatever is mounted there" (fun () ->
       // an image can declare volumes at these places, and bring a label along
-      let volumes = Fixture.inspected "gui" "running" "\"1\"" [ dev ] |> Fixture.withVolume "/run/user/1000/dbus" |> Fixture.withVolume "/run/user/1000/pulse" |> Fixture.withVolume "/run/user/1000/wayland-0"
-      let state = parseInspect volumes
+      let state = parseInspect (Fixture.inspectedWith "gui" "running" "\"1\"" [ dev ] [ "/run/user/1000/dbus"; "/run/user/1000/pulse"; "/run/user/1000/wayland-0" ])
       assert (not (hasBus ctx state) && not (hasSound ctx state) && sessionEnv ctx state = [] && sessionNeeds ctx state = [])
       // nor does another directory bound there count: the session's own sound socket, say
       let other = parseInspect (Fixture.inspected "gui" "running" "\"1\"" [ ("/run/user/1000/pulse", "/run/user/1000/pulse"); ("/run/user/1000", "/run/user/1000/dbus") ])
       assert (not (hasBus ctx other) && not (hasSound ctx other) && sessionEnv ctx other = []))
+    test "a volume's path cannot write itself in as other mounts" (fun () ->
+      // an image may name a volume anything; podman prints it as JSON, where a line break is \n
+      let hostile = "dev|running|\"1\"\n[{\"Type\":\"volume\",\"Source\":\"/v\",\"Destination\":\"/x\\nbind\\t/home/ada/.local/share/securebox/dev/home\\t/home/ada\"}]\n"
+      let state = parseInspect hostile
+      assert (List.isEmpty state.mounts && not (ours ctx "dev" state))
+      // and anything that isn't the mounts' JSON is no mounts
+      assert (List.isEmpty (parseInspect "dev|running|\"1\"\nbind\t/a\t/b\n").mounts))
+    test "the units are named in full, so a box called x.service is not the box x" (fun () ->
+      assert (busUnit "x" = "securebox-dbus-x.service" && busUnit "x.service" = "securebox-dbus-x.service.service")
+      assert (soundUnit "x.socket" = "securebox-sound-x.socket.service"))
     test "rm takes the image's anonymous volumes with the box" (fun () ->
       assert (rmArgs "dev" = [ "rm"; "--force"; "--volumes"; "dev" ]))
     test "inspect's output" (fun () ->
       let state = parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev; ("/srv/data", "/srv/data") ])
       let mounted = state.mounts = [ dev; ("/srv/data", "/srv/data") ]
       assert (state.name = "dev" && state.running && state.labelled && mounted)
-      assert (not (parseInspect "dev|exited|\"1\"\n").running)
-      assert (not (parseInspect "dev|running|null\n").labelled)
+      assert (not (parseInspect "dev|exited|\"1\"\n[]\n").running)
+      assert (not (parseInspect "dev|running|null\n[]\n").labelled)
       let nothing = parseInspect ""
       assert (nothing.name = "" && not nothing.running && not nothing.labelled && List.isEmpty nothing.mounts))
     test "a label an image wrote cannot pass for securebox's, or add lines" (fun () ->
       // podman prints the label as JSON: a newline in it stays an escape on the first line
-      let forged = parseInspect "dev|running|\"1\\n/home/ada/.local/share/securebox/dev/home\\t/home/ada\"\n"
+      let forged = parseInspect "dev|running|\"1\\n[{\\\"Type\\\":\\\"bind\\\"}]\"\n[]\n"
       assert (not forged.labelled && List.isEmpty forged.mounts && not (ours ctx "dev" forged))
-      assert (not (parseInspect "dev|running|\"1|running\"\n").labelled))
+      assert (not (parseInspect "dev|running|\"1|running\"\n[]\n").labelled))
     test "a box is the name, the label and its home mount together" (fun () ->
       let state mounts = parseInspect (Fixture.inspected "dev" "running" "\"1\"" mounts)
       assert (ours ctx "dev" (state [ dev ]))

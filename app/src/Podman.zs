@@ -34,8 +34,9 @@ let hostSoundDir (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}/pu
 let hostSoundConf (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}/sound"
 
 /// The units of the user's systemd that the filter and the front-end run as.
-let busUnit (name: string) = $"securebox-dbus-{name}"
-let soundUnit (name: string) = $"securebox-sound-{name}"
+/// Named in full: a box may be called `x.service` or `x.socket`.
+let busUnit (name: string) = $"securebox-dbus-{name}.service"
+let soundUnit (name: string) = $"securebox-sound-{name}.service"
 
 let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
   let share (s: Share) =
@@ -55,7 +56,7 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
     else []
   let wayland =
     match spec.wayland with
-    | Some socket -> [ "--mount"; $"type=bind,src={socket},dst={waylandSocket ctx}" ]
+    | Some socket -> [ "--mount"; $"type=bind,src={socket},dst={waylandSocket ctx},ro" ]
     | None -> []
   // directories, not the sockets: a server that restarts makes a new socket in the same place
   let sound =
@@ -85,26 +86,40 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
     dbus
     [ spec.image ] ]
 
-/// The name, the state and the label on one line, then a mount per line. The label is
-/// printed as JSON, so whatever an image put in it stays on that line.
+/// The name, the state and the label on one line, then the mounts on another. The label
+/// and the mounts are printed as JSON, so whatever an image put in a label or in the path
+/// of a volume stays inside its string.
 let inspectArgs (name: string) =
   [ "inspect"; "--type"; "container"; "--format"
-    "{{.Name}}|{{.State.Status}}|{{json (index .Config.Labels \"securebox\")}}{{range .Mounts}}{{\"\\n\"}}{{.Type}}{{\"\\t\"}}{{.Source}}{{\"\\t\"}}{{.Destination}}{{end}}"
+    "{{.Name}}|{{.State.Status}}|{{json (index .Config.Labels \"securebox\")}}{{\"\\n\"}}{{json .Mounts}}"
     name ]
 
-/// Reads `inspectArgs`' output: `dev|running|"1"`, then a `type<TAB>source<TAB>destination`
-/// line per mount, of which the binds are kept.
+/// Reads `inspectArgs`' output: `dev|running|"1"`, then the mounts as a JSON array, of which
+/// the binds are kept.
 let parseInspect (output: string) : BoxState =
-  let mount (line: string) =
-    match String.split "\t" line with
-    | [ "bind"; source; destination ] -> Some (source, destination)
+  let text (key: string) (fields: list<string * Json>) =
+    match List.tryFind (fun (k, _) -> k = key) fields with
+    | Some (_, JString s) -> Some s
     | _ -> None
+  let bind (mount: Json) =
+    match mount with
+    | JObject fields ->
+      match (text "Type" fields, text "Source" fields, text "Destination" fields) with
+      | (Some "bind", Some source, Some destination) -> Some (source, destination)
+      | _ -> None
+    | _ -> None
+  let binds (line: string) =
+    match Json.parse line with
+    | Ok (JArray mounts) -> List.choose bind mounts
+    | _ -> []
   match String.splitLines (String.trim output) with
   | first :: rest ->
     match String.split "|" first with
     | name :: status :: label ->
       { name = name; running = status = "running"; labelled = String.join "|" label = "\"1\""
-        mounts = List.choose mount rest }
+        mounts = (match rest with
+                  | line :: _ -> binds line
+                  | [] -> []) }
     | _ -> { name = ""; running = false; labelled = false; mounts = [] }
   | [] -> { name = ""; running = false; labelled = false; mounts = [] }
 
@@ -148,15 +163,17 @@ let busLabelArgs (name: string) =
   [ "inspect"; "--type"; "container"; "--format"; "{{index .Config.Labels \"securebox.dbus\"}}"; name ]
 
 /// The D-Bus filter of a box, run by the user's systemd so that it outlives securebox:
-/// xdg-dbus-proxy between the session bus and a socket of the box's, letting through only
-/// calls to the names granted.
+/// xdg-dbus-proxy between the session bus and a socket of the box's. For each name granted
+/// it lets through calls to the interface of that name, and that interface's signals: not
+/// everything the process owning the name exports, which `--talk` would give (gnome-shell
+/// owns notification names, and its remote-desktop interface on the same connection).
 let unitActiveArgs (unit: string) = [ "--user"; "is-active"; "--quiet"; unit ]
 let unitStopArgs (unit: string) = [ "--user"; "stop"; unit ]
 let proxyStartArgs (ctx: Ctx) (name: string) (names: list<string>) =
   List.concat [
     [ "--user"; "--quiet"; "--collect"; "--unit"; busUnit name; "--"; "xdg-dbus-proxy" ]
     [ ctx.busAddress; hostBusDir ctx name + "/bus"; "--filter" ]
-    List.map (fun n -> "--talk=" + n) names ]
+    List.collect (fun n -> [ "--see=" + n; $"--call={n}={n}.*"; $"--broadcast={n}={n}.*" ]) names ]
 
 /// Where a command starts in the box: the host's working directory when a share holds it,
 /// the home directory otherwise.

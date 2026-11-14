@@ -30,6 +30,7 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
       k 0
     | Host.dirExists path, k -> k (List.contains path present)
     | Host.pathExists path, k -> k (List.contains path present)
+    | Host.isSocket path, k -> k (List.contains path present)
     | Host.realPath path, k ->
       k (match List.tryFind (fun (link, _) -> link = path) links with
          | Some (_, target) -> target
@@ -53,13 +54,17 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
     | Host.say _, k -> k ()
   (result, List.rev calls)
 
-/// What `podman inspect` prints for a container, as `Podman.inspectArgs` asks for it: the
-/// mounts given are bind mounts.
-let inspected (name: string) (status: string) (label: string) (mounts: list<string * string>) =
-  $"{name}|{status}|{label}\n" + String.concat (List.map (fun (source, destination) -> $"bind\t{source}\t{destination}\n") mounts)
+/// What `podman inspect` prints for a container, as `Podman.inspectArgs` asks for it:
+/// bind mounts as source and destination, and the destinations of volumes an image declared.
+let inspectedWith (name: string) (status: string) (label: string) (binds: list<string * string>) (volumes: list<string>) =
+  let mount (kind: string) (source: string) (destination: string) =
+    "{\"Type\":\"" + kind + "\",\"Source\":\"" + source + "\",\"Destination\":\"" + destination + "\"}"
+  let bind (source, destination) = mount "bind" source destination
+  let volume destination = mount "volume" "/var/lib/containers/volumes/x/_data" destination
+  $"{name}|{status}|{label}\n[" + String.join "," (List.append (List.map bind binds) (List.map volume volumes)) + "]\n"
 
-/// The same, followed by a volume an image declared.
-let withVolume (destination: string) (state: string) = state + $"volume\t/var/lib/containers/volumes/x/_data\t{destination}\n"
+let inspected (name: string) (status: string) (label: string) (mounts: list<string * string>) =
+  inspectedWith name status label mounts []
 
 /// What the host must have for a sound front-end to be started.
 let pipewire = [ "/run/user/1000/pipewire-0"; "/usr/share/pipewire/pipewire-pulse.conf" ]
@@ -74,3 +79,15 @@ let box (state: string) (args: list<string>) : ProcessResult =
   | "inspect" :: _ -> if state = "" then { code = 125; output = "" } else { code = 0; output = state }
   | "container" :: "exists" :: _ -> { code = (if state = "" then 1 else 0); output = "" }
   | _ -> { code = 0; output = "" }
+
+/// podman's answers around a `create` of `dev`: no such container before it, the container
+/// in `state` once it is made; `exec` in it answers with `execCode`.
+let creating (state: string) (execCode: int) : list<string> -> ProcessResult =
+  let made = ref false
+  fun args ->
+    match args with
+    | "create" :: _ ->
+      made.Value <- true
+      { code = 0; output = "" }
+    | "exec" :: "dev" :: _ -> { code = execCode; output = "" }
+    | _ -> box (if made.Value then state else "") args

@@ -21,7 +21,7 @@ let private badShares =
     "/home/ada/.local/share/securebox"; "/home/ada/.local/share/securebox/dev/home"
     "/etc"; "/etc/ssh"; "/usr/bin"; "/usr/lib"; "/boot"; "/dev/dri"; "/proc/1"; "/sys"; "/root"; "/root/x"
     "/var"; "/run"; "/tmp"; "/var/tmp"; "/var/lib/containers"; "/var/log"
-    "/run/user"; "/run/user/1000"; "/run/user/1000/bus"
+    "/run/user"; "/run/user/1000"; "/run/user/1000/bus"; "/run/dbus"; "/run/systemd/private"; "/run/media"; "/run/mount"
     "/srv/a,b"; "/srv/a:b"; "/srv/a\nb" ]
 
 let private badPorts =
@@ -69,6 +69,18 @@ let tests =
       for n in [ ""; "org"; "org."; ".org.x"; "org..x"; "org.freedesktop.*"; "*"; "org.1x"; "org.x y"; "--talk=org.x"; "org.x,org.y"
                  "org.freedesktop.systemd1"; "org.freedesktop.Flatpak"; "org.freedesktop.DBus"; ":1.42" ] do
         assert (Result.isError (Box.busName n)))
+    test "shares of one box: none twice, none inside a read-write one" (fun () ->
+      let rw path = { path = path; readOnly = false }
+      let ro path = { path = path; readOnly = true }
+      assert (Result.isOk (Box.together [ rw "/srv/a"; rw "/srv/b"; ro "/srv/c" ]) && Result.isOk (Box.together []))
+      assert (Result.isOk (Box.together [ ro "/srv/a"; rw "/srv/a/build" ]))      // inside a read-only one: the box cannot replace it
+      assert (Result.isOk (Box.together [ rw "/srv/a"; rw "/srv/ab" ]))           // a prefix of the name is not inside
+      for shares in [ [ rw "/srv/a"; ro "/srv/a/.git" ]; [ ro "/srv/a/.git"; rw "/srv/a" ]; [ rw "/srv/a"; rw "/srv/a/x/y" ]; [ rw "/srv/a"; rw "/srv/a" ]; [ ro "/srv/a"; ro "/srv/a" ] ] do
+        assert (Result.isError (Box.together shares)))
+    test "the runtime directory can be written where securebox writes it" (fun () ->
+      assert (Box.runtimePath "/run/user/1000" = Ok "/run/user/1000")
+      for p in [ "run/user"; "/run/us er"; "/run/$HOME"; "/run/a\"b"; "/run/a,b"; "/run/a=b" ] do
+        assert (Result.isError (Box.runtimePath p)))
     test "network" (fun () ->
       assert (Box.network "private" = Ok Private && Box.network "none" = Ok NoNetwork && Box.network "host" = Ok HostNetwork)
       assert (Result.isError (Box.network "bridge")))

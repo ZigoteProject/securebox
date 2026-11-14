@@ -90,8 +90,8 @@ let runtimePath (path: string) : result<string, string> =
   match mountable path with
   | Error e -> Error e
   | Ok _ ->
-    if List.exists (fun c -> c = '"' || c = '\\' || c = ' ' || c = '=') (String.chars path) then
-      Error $"'{path}' has a quote, a backslash, a space or an equals sign, which securebox cannot write it with"
+    if List.exists (fun c -> c = '"' || c = '\\' || c = ' ' || c = '=' || c = '$') (String.chars path) then
+      Error $"'{path}' has a quote, a backslash, a space, an equals sign or a dollar, which securebox cannot write it with"
     else Ok path
 
 /// The home directory: it is also written into a sed script that fixes the box's passwd
@@ -136,8 +136,10 @@ let sharePath (ctx: Ctx) (path: string) : result<string, string> =
   | Ok _ ->
     if List.exists (fun h -> under path h) ctx.homes then
       refuse "it is your home directory or contains it; share a directory inside it"
-    else if List.exists (fun d -> under d path) [ "/etc"; "/usr"; "/boot"; "/dev"; "/proc"; "/sys"; "/root"; "/run/user"; "/var/lib"; "/var/log" ]
-            || List.contains path [ "/var"; "/run"; "/tmp"; "/var/tmp" ] then
+    else if List.exists (fun d -> under d path) [ "/etc"; "/usr"; "/boot"; "/dev"; "/proc"; "/sys"; "/root"; "/var/lib"; "/var/log" ]
+            || List.contains path [ "/var"; "/tmp"; "/var/tmp" ]
+            // /run holds the system's sockets (its bus, systemd's); removable media are mounted under it too
+            || (under "/run" path && not (List.exists (fun d -> under d path && path <> d) [ "/run/media"; "/run/mount" ])) then
       refuse "it is a system directory"
     else if List.exists (fun d -> under d path || under path d) ctx.offLimits then
       refuse "it is, holds or is inside securebox's data or your session's runtime directory"
@@ -156,9 +158,25 @@ let busName (s: string) : result<string, string> =
   let elements = String.split "." s
   if List.length elements < 2 || String.length s > 255 || not (List.forall element elements) then
     Error $"'{s}' is not a name on the session bus: write one out, as org.freedesktop.Notifications"
+  // a courtesy, not a list of what is safe: many more names give away the session
   else if List.contains s [ "org.freedesktop.systemd1"; "org.freedesktop.Flatpak"; "org.freedesktop.DBus" ] then
     Error $"refusing to let a box talk to {s}: it runs commands on the host for whoever asks"
   else Ok s
+
+/// The shares of one box, together: none twice, and none inside a read-write one, where
+/// the box could put a link in its place for podman to follow at the next start.
+let together (shares: list<Share>) : result<list<Share>, string> =
+  let numbered : list<int * Share> = List.indexed shares
+  let against (i: int) (inner: Share) (j: int) (outer: Share) =
+    if i = j then None
+    else if inner.path = outer.path then Some $"'{inner.path}' is shared twice"
+    else if under outer.path inner.path && not outer.readOnly then
+      Some $"'{inner.path}' is inside '{outer.path}', which is shared read-write: the box could replace it. Share the outer one read-only, or only one of them"
+    else None
+  let clash = List.tryPick (fun (i, inner) -> List.tryPick (fun (j, outer) -> against i inner j outer) numbered) numbered
+  match clash with
+  | Some why -> Error why
+  | None -> Ok shares
 
 let network (s: string) : result<Network, string> =
   match s with

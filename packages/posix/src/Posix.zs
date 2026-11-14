@@ -52,3 +52,8 @@ let userHome () = String.ofCStr (posix_user_home ())
 
 /// Whether the path exists, whatever it is: a file, a directory, a socket.
 let exists (path: string) = access path (i32 0) = i32 0
+
+extern posix_is_socket : cstr -> i32
+
+/// Whether the path is a socket.
+let isSocket (path: string) = posix_is_socket path = i32 1

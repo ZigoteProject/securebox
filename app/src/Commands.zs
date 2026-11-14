@@ -67,24 +67,28 @@ let private settle (ctx: Ctx) (name: string) : result<unit, string> =
 
 /// Makes sure a unit of the box's is running: started through the user's systemd, which
 /// keeps it when securebox is gone. `prepare` is run only when it must be started, and
-/// gives the arguments of `systemd-run`.
-let private served (ctx: Ctx) (unit: string) (socket: string) (needs: string) (prepare: unit -> result<list<string>, string>) : result<unit, string> =
+/// gives the arguments of `systemd-run`. A new box takes none over (`fresh`): one left under
+/// its name was started for another box, with other grants.
+let private served (ctx: Ctx) (fresh: bool) (unit: string) (socket: string) (needs: string) (prepare: unit -> result<list<string>, string>) : result<unit, string> =
   if ctx.runtime = "" then Error $"{needs}, and there is no session here (XDG_RUNTIME_DIR is not set or cannot be used)"
-  else if Host.tool ("systemctl", unitActiveArgs unit) = 0 then Ok ()
   else
-    match prepare () with
-    | Error e -> Error e
-    | Ok args ->
-      Host.removeTree socket       // one that a unit that was killed left
-      if Host.tool ("systemd-run", args) <> 0 then Error $"{needs}, through a systemd user session (systemd-run --user), and it could not be started"
-      else if Host.awaitPath socket then Ok ()
-      else Error $"{needs}, which was started but is not listening"
+    if fresh then Host.tool ("systemctl", unitStopArgs unit) |> ignore
+    if not fresh && Host.tool ("systemctl", unitActiveArgs unit) = 0 then Ok ()
+    else
+      match prepare () with
+      | Error e -> Error e
+      | Ok args ->
+        Host.removeTree socket       // one that a unit that was killed left
+        if Host.tool ("systemd-run", args) <> 0 then Error $"{needs}, through a systemd user session (systemd-run --user), and it could not be started"
+        else if Host.awaitPath socket then Ok ()
+        else Error $"{needs}, which was started but is not listening"
 
 /// A `--dbus` box's filter. `names` is asked for only when it must be started.
-let private filtered (ctx: Ctx) (name: string) (names: unit -> result<list<string>, string>) : result<unit, string> =
-  served ctx (busUnit name) (hostBusDir ctx name + "/bus") "--dbus needs xdg-dbus-proxy" (fun () ->
-    if ctx.busAddress = "" || String.startsWith "-" ctx.busAddress then
-      Error "--dbus needs your session bus, and there is none here (DBUS_SESSION_BUS_ADDRESS is not set)"
+let private filtered (ctx: Ctx) (fresh: bool) (name: string) (names: unit -> result<list<string>, string>) : result<unit, string> =
+  served ctx fresh (busUnit name) (hostBusDir ctx name + "/bus") "--dbus needs xdg-dbus-proxy" (fun () ->
+    // the address is one argument of the filter's, and systemd expands a $ in it
+    if ctx.busAddress = "" || String.startsWith "-" ctx.busAddress || String.contains "$" ctx.busAddress then
+      Error "--dbus needs your session bus, and DBUS_SESSION_BUS_ADDRESS is not set or cannot be used"
     else
       match (names (), Host.ensureDir (hostBusDir ctx name)) with
       | (Error e, _) -> Error e
@@ -93,8 +97,8 @@ let private filtered (ctx: Ctx) (name: string) (names: unit -> result<list<strin
 
 /// A `--sound` box's front-end: the session's own pipewire-pulse configuration, with an
 /// override that moves its socket into the box's directory and turns module loading off.
-let private fronted (ctx: Ctx) (name: string) : result<unit, string> =
-  served ctx (soundUnit name) (hostSoundDir ctx name + "/native") "--sound needs pipewire-pulse" (fun () ->
+let private fronted (ctx: Ctx) (fresh: bool) (name: string) : result<unit, string> =
+  served ctx fresh (soundUnit name) (hostSoundDir ctx name + "/native") "--sound needs pipewire-pulse" (fun () ->
     let conf = hostSoundConf ctx name
     if not (Host.pathExists (ctx.runtime + "/pipewire-0")) then
       Error $"--sound needs PipeWire, and there is no socket of it at {ctx.runtime}/pipewire-0"
@@ -111,6 +115,12 @@ let private fronted (ctx: Ctx) (name: string) : result<unit, string> =
         | Some (Error e) -> Error $"--sound: {e}"
         | _ -> Ok (soundStartArgs ctx name))
 
+/// Stops a box's units, and with `gone` clears their place in the runtime directory.
+let private unserve (ctx: Ctx) (name: string) (bus: bool) (sound: bool) (gone: bool) =
+  if bus then Host.tool ("systemctl", unitStopArgs (busUnit name)) |> ignore
+  if sound then Host.tool ("systemctl", unitStopArgs (soundUnit name)) |> ignore
+  if gone && ctx.runtime <> "" && (bus || sound) then Host.removeTree (hostBoxDir ctx name)
+
 /// The names a `--dbus` box was created with, read back from its label and checked again.
 let private busNames (name: string) () : result<list<string>, string> =
   match podman (busLabelArgs name) $"cannot read the D-Bus names of the box '{name}'" with
@@ -120,52 +130,83 @@ let private busNames (name: string) () : result<list<string>, string> =
     if names <> [] && List.forall (fun n -> Result.isOk (busName n)) names then Ok names
     else Error $"the box '{name}' has no usable list of D-Bus names; create it again with --dbus"
 
+/// The compositor's socket for `--wayland`, from where `$WAYLAND_DISPLAY` says it is: it
+/// must be a socket, and in the session's runtime directory, whatever that variable says.
+let wayland (ctx: Ctx) (given: string) : result<string, string> =
+  let resolved = Host.realPath given
+  if resolved = "" || not (Host.isSocket resolved) then Error $"--wayland: there is no compositor socket at {given}"
+  else if ctx.runtime = "" || not (under (Host.realPath ctx.runtime) resolved) || Host.realPath ctx.runtime = resolved then
+    Error $"--wayland: {resolved} is not in your session's runtime directory"
+  else
+    match mountable resolved with
+    | Error e -> Error $"--wayland: {e}"
+    | Ok socket -> Ok socket
+
+/// Whether a share is still the directory it was when the box was created. podman resolves
+/// a mount's source again at every start, and a box with a read-write share that holds
+/// another box's share can put a link there in the meantime.
+let private unchanged (ctx: Ctx) (path: string) : result<unit, string> =
+  let now = Host.realPath path
+  if now = path && Result.isOk (sharePath ctx path) then Ok ()
+  else Error $"the shared directory '{path}' is not what it was when the box was created (it is now '{now}'): the box is not started. Remove the box and create it again"
+
 let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
-  let lacking = List.filter (fun socket -> not (Host.pathExists socket)) (Option.toList spec.wayland)
-  match lacking with
-  | socket :: _ -> Error $"--wayland: there is no compositor socket at {socket}"
-  | [] ->
+  let session = Option.isSome spec.wayland || spec.sound || spec.dbus <> []
+  let _ = (together spec.shares)?
+  // with labelling off for a session grant, the host's network namespace would also put
+  // the session's abstract sockets (X11's, for one) in the box's reach
+  let _ = (if session && spec.network = HostNetwork then Error "--network host cannot be combined with --wayland, --sound or --dbus" else Ok ())?
+  // the name must be free before anything is started under it
+  let found = (look ctx spec.name)?
+  match found with
+  | Ours _ -> Error $"there is already a box named '{spec.name}'"
+  | Foreign -> Error $"there is already a container named '{spec.name}', which is not a box of securebox's"
+  | Missing ->
     let home = boxHome ctx spec.name
     let kept = Host.dirExists home
     let _ = (Host.ensureDir home)?
     // the filter and the front-end first: their directories are what the box mounts
-    let _ = (if spec.dbus = [] then Ok () else filtered ctx spec.name (fun () -> Ok spec.dbus))?
-    let _ = (if spec.sound then fronted ctx spec.name else Ok ())?
-    let _ = (podman (createArgs ctx spec) $"podman could not create the box '{spec.name}'")?
-    let _ = (podman (startArgs spec.name) $"the box '{spec.name}' was created but did not start")?
-    let _ = (settle ctx spec.name)?
-    Host.say (if kept then $"created the box '{spec.name}', with the home directory an earlier box of that name left"
-              else $"created the box '{spec.name}'")
-    Host.say $"enter it with: securebox enter {spec.name}"
-    Ok 0
+    let made =
+      result {
+        let! _ = if spec.dbus = [] then Ok () else filtered ctx true spec.name (fun () -> Ok spec.dbus)
+        let! _ = if spec.sound then fronted ctx true spec.name else Ok ()
+        let! _ = podman (createArgs ctx spec) $"podman could not create the box '{spec.name}'"
+        let! _ = podman (startArgs spec.name) $"the box '{spec.name}' was created but did not start"
+        return! settle ctx spec.name
+      }
+    match made with
+    | Error e ->
+      // nothing is left running under the name of a box that wasn't made
+      unserve ctx spec.name (spec.dbus <> []) spec.sound true
+      Error e
+    | Ok () ->
+      Host.say (if kept then $"created the box '{spec.name}', with the home directory an earlier box of that name left"
+                else $"created the box '{spec.name}'")
+      Host.say $"enter it with: securebox enter {spec.name}"
+      Ok 0
 
 let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<int, string> =
   let state = (find ctx name)?
   // what the session must have for the box's grants: the filter and the front-end always,
   // the compositor's socket to start it
-  let _ = (if hasBus ctx state then filtered ctx name (busNames name) else Ok ())?
-  let _ = (if hasSound ctx state then fronted ctx name else Ok ())?
-  let lacking = if state.running then [] else List.filter (fun (_, path) -> not (Host.pathExists path)) (sessionNeeds ctx state)
+  let _ = (if hasBus ctx state then filtered ctx false name (busNames name) else Ok ())?
+  let _ = (if hasSound ctx state then fronted ctx false name else Ok ())?
+  let changed = if state.running then [] else List.filter Result.isError (List.map (unchanged ctx) (shares ctx state))
+  let lacking = if state.running then [] else List.filter (fun (_, path) -> not (Host.isSocket path)) (sessionNeeds ctx state)
   let started =
-    match lacking with
-    | (what, path) :: _ -> Error $"the box '{name}' was created with {what}, and {path} is not there: start it from your graphical session"
-    | [] -> if state.running then Ok "" else podman (startArgs name) $"the box '{name}' did not start"
+    match (changed, lacking) with
+    | (Error e :: _, _) -> Error e
+    | (_, (what, path) :: _) -> Error $"the box '{name}' was created with {what}, and {path} is not there: start it from your graphical session"
+    | _ -> if state.running then Ok "" else podman (startArgs name) $"the box '{name}' did not start"
   let _ = started?
   Ok (Host.exec (execArgs ctx name root (sessionEnv ctx state) (workdir ctx (shares ctx state)) cmd))
 
 let list () : result<int, string> = Ok (Host.exec listArgs)
 
-/// A stopped box needs no filter and no front-end, and a removed one no place for them.
-let private unserved (ctx: Ctx) (name: string) (state: BoxState) (removed: bool) =
-  if hasBus ctx state then Host.tool ("systemctl", unitStopArgs (busUnit name)) |> ignore
-  if hasSound ctx state then Host.tool ("systemctl", unitStopArgs (soundUnit name)) |> ignore
-  if removed && ctx.runtime <> "" && (hasBus ctx state || hasSound ctx state) then
-    Host.removeTree (hostBoxDir ctx name)
-
 let stop (ctx: Ctx) (name: string) : result<int, string> =
   let state = (find ctx name)?
   let stopped = if state.running then podman (stopArgs name) $"the box '{name}' did not stop" else Ok ""
-  unserved ctx name state false
+  unserve ctx name (hasBus ctx state) (hasSound ctx state) false
   Result.map (fun _ -> 0) stopped
 
 let private purged (ctx: Ctx) (name: string) (failure: string) : result<int, string> =
@@ -181,13 +222,15 @@ let rm (ctx: Ctx) (name: string) (purge: bool) : result<int, string> =
   | Error e -> Error e
   | Ok Foreign -> Error (foreign name)
   | Ok Missing ->
-    // the container is gone already: what it left can still be purged, when it is a box's
+    // the container is gone already (removed with podman, say): nothing stays running
+    // under its name, and what it left can still be purged, when it is a box's
+    if ctx.runtime <> "" && Host.pathExists (hostBoxDir ctx name) then unserve ctx name true true true
     if purge && Host.dirExists (boxHome ctx name) then purged ctx name $"could not delete {dir}" else Error (missing name)
   | Ok (Ours state) ->
     match podman (rmArgs name) $"the box '{name}' was not removed" with
     | Error e -> Error e
     | Ok _ ->
-      unserved ctx name state true
+      unserve ctx name (hasBus ctx state) (hasSound ctx state) true
       if purge then purged ctx name $"the box is removed, but {dir} could not be deleted"
       else
         if Host.dirExists dir then

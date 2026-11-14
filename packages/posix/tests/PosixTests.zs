@@ -11,6 +11,7 @@ let tests =
       assert (Posix.realPath "/proc/self/../self/." = Posix.realPath "/proc/self")
       assert (String.startsWith "/proc/" (Posix.realPath "/proc/self") && Posix.realPath "/proc/self" <> "/proc/self")
       assert (Posix.realPath "/no/such/path" = "" && Posix.realPath "" = ""))
+    test "isSocket" (fun () -> assert (not (Posix.isSocket "/proc/self") && not (Posix.isSocket "/no/such/path")))
     test "exists" (fun () -> assert (Posix.exists "/proc/self" && Posix.exists "/" && not (Posix.exists "/no/such/path")))
     test "the passwd entry" (fun () -> assert (Posix.userName () <> "" && String.startsWith "/" (Posix.userHome ())))
     test "a NUL in an argument is refused" (fun () ->

@@ -7,8 +7,9 @@ effect Host =
   /// Replaces securebox with podman. Gives an exit code only when podman couldn't start.
   abstract exec : list<string> -> int
   abstract dirExists : string -> bool
-  /// Whether the path exists, whatever it is (a socket, for one).
+  /// Whether the path exists, whatever it is.
   abstract pathExists : string -> bool
+  abstract isSocket : string -> bool
   /// The path with its symbolic links resolved; "" when it doesn't exist.
   abstract realPath : string -> string
   /// Creates a directory, private to the user, and those above it.
@@ -50,6 +51,7 @@ let real (app: unit -> 'a) =
     k 125
   | Host.dirExists path, k -> k (Directory.exists path)
   | Host.pathExists path, k -> k (Posix.exists path)
+  | Host.isSocket path, k -> k (Posix.isSocket path)
   | Host.realPath path, k -> k (Posix.realPath path)
   | Host.ensureDir path, k -> k (createAll path)
   | Host.tool (program, args), k ->

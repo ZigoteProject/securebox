@@ -15,7 +15,7 @@ securebox stop web
 securebox rm web                                       # keeps the box's home; --purge deletes it
 ```
 
-One static binary of about 500 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
+One static binary of about 620 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
 0.7.1. Podman is the only thing it needs at run time, and it is rootless only: securebox
 refuses to run as root.
 
@@ -79,10 +79,11 @@ All off by default, all given to `create`, all visible in `securebox list`.
 | `--gpu` | the GPU's render devices (`/dev/dri/renderD*`) |
 | `--wayland` | the Wayland compositor's socket, for GUI programs (*) |
 | `--sound` | playing and recording sound, through a front-end of the box's own (*) |
-| `--dbus NAME` | calls to that one name on your session bus, through a filter (repeatable) (*) |
+| `--dbus NAME` | calls to the interface of that name on your session bus, through a filter (repeatable) (*) |
 
 (*) These three reach into your desktop session, and on an SELinux host a box with any of
-them runs **without SELinux confinement**. See below.
+them runs **without SELinux confinement**. They cannot be combined with `--network host`.
+See below.
 
 securebox refuses to share your home directory, anything that contains it, system
 directories, your session's runtime directory (`/run/user/UID`), its own data, and
@@ -91,6 +92,10 @@ to, so a symbolic link to any of those is refused too. On an SELinux host, shari
 directory relabels it for containers, permanently; that is harmless for a project
 directory.
 
+One box cannot have a share inside another of its read-write shares (the box could swap
+the inner one for a link), and a stopped box is started only if each of its shares is
+still the directory it was when the box was created.
+
 ### Desktop programs: `--wayland`, `--sound`, `--dbus`
 
 A box created with any of these gets a private runtime directory (`XDG_RUNTIME_DIR`) that
@@ -98,19 +103,27 @@ holds only what was granted, and `enter` tells programs where each thing is.
 
 - **`--wayland`**: the compositor's socket. Wayland programs open their windows on your
   desktop; add `--gpu` for accelerated rendering. A Wayland client can do what the
-  compositor lets any client do; on GNOME and KDE that excludes capturing the screen.
+  compositor lets any client do. On GNOME and KDE that excludes capturing the screen and
+  typing into other windows. **On wlroots compositors (sway, Hyprland, …) it includes
+  both**: there, treat `--wayland` as giving the box your desktop.
 - **`--sound`**: programs can play sound, and also **record**: the microphone, and what
   other programs are playing. The box does not get your sound server's socket: whoever has
   that can make the server load modules, which create files and open network ports on the
   host. It gets the socket of a second PulseAudio front-end that securebox runs for the box
-  alone, with module loading turned off. PipeWire's own socket is not shared either, so
-  cameras and screen sharing stay out of reach. Needs PipeWire on the host.
-- **`--dbus NAME`**: the box may call that one name on your session bus, for instance
-  `--dbus org.freedesktop.Notifications`. It never gets the bus itself. Whoever holds the
-  session bus can ask systemd to run any command as you, or ask the keyring for your
-  passwords, so securebox runs a filter (`xdg-dbus-proxy`) between the bus and the box
-  that lets through only the names you granted, and refuses outright to grant the names
-  that run commands on the host. A program that only needs *a* bus of its own can start
+  alone, with module loading turned off. Through it the box can also see which programs
+  are using sound, but not change volumes or devices. PipeWire's own socket is not shared
+  either, so cameras and screen sharing stay out of reach. Needs PipeWire on the host.
+- **`--dbus NAME`**: the box may call the interface of that name on your session bus, for
+  instance `--dbus org.freedesktop.Notifications`. It never gets the bus itself. Whoever
+  holds the session bus can ask systemd to run any command as you, or ask the keyring for
+  your passwords, so securebox runs a filter (`xdg-dbus-proxy`) between the bus and the
+  box. The filter lets through calls to the interface named like the bus name, and
+  nothing else the program behind that name offers (gnome-shell answers to notification
+  names and to remote-desktop requests on the same connection). **Each name you grant is
+  your decision about that service**: securebox refuses two names that plainly run
+  commands on the host, and that is a courtesy, not a list of what is safe. Don't grant
+  `org.freedesktop.secrets`, `org.gnome.Shell`, `ca.desrt.dconf` or a portal to a box you
+  don't trust. A program that only needs *a* bus of its own can start
   one inside the box (`dbus-run-session`), which needs no grant.
 
 The cost, on an SELinux host: SELinux does not let a confined container connect to a
@@ -151,8 +164,8 @@ cp build/securebox ~/.local/bin/
 ## Testing
 
 ```sh
-zs test            # 141 unit tests: validation, the exact podman arguments, the command flows
-tests/e2e.sh       # 230 checks with real podman, on Fedora, Ubuntu and Alpine images
+zs test            # 156 unit tests: validation, the exact podman arguments, the command flows
+tests/e2e.sh       # 250 checks with real podman, on Fedora, Ubuntu and Alpine images
 ```
 
 The end-to-end script creates boxes named `sbx-e2e-<pid>-*`, keeps their data in a
@@ -173,8 +186,9 @@ DESIGN.md          the design: threat model, the podman command lines, what was 
 `SECUREBOX_DATA` moves the boxes' home directories somewhere else than
 `$XDG_DATA_HOME/securebox`. It cannot be your home directory or hold it.
 
-The code has had a correctness review and an independent security review; DESIGN.md,
-appendix D, lists what they found and what was done about each finding.
+The code has had a correctness review and two independent security reviews, the second
+of the desktop grants; DESIGN.md, appendix D, lists what they found and what was done
+about each finding.
 
 ## Limits
 

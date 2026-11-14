@@ -261,7 +261,7 @@ if command -v xdg-dbus-proxy >/dev/null && command -v busctl >/dev/null && [ -n 
   name="$prefix-dbus"
   boxes+=("$name")
   unit="securebox-dbus-$name"
-  "$SB" create "$name" "$image" --dbus org.freedesktop.Notifications >/dev/null 2>&1
+  "$SB" create "$name" "$image" --dbus org.freedesktop.Notifications --dbus org.gtk.Notifications >/dev/null 2>&1
   is "$t --dbus: create" 0 $?
   is "$t --dbus: the filter runs as a unit of the user's" "active" "$(systemctl --user is-active "$unit" 2>&1)"
   is "$t --dbus: the box is told where the filtered bus is" "socket" "$(box 'test -S "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" && echo socket')"
@@ -275,7 +275,16 @@ if command -v xdg-dbus-proxy >/dev/null && command -v busctl >/dev/null && [ -n 
   names=$(busctl --address="$filter" list --no-legend 2>/dev/null | awk '{print $1}' | grep -v '^:' | sort | tr '\n' ' ')
   has "$t --dbus: the bus is reachable through the filter" "org.freedesktop.DBus " "$names"
   hasnt "$t --dbus: systemd is not visible through it" "org.freedesktop.systemd1" "$names"
-  is "$t --dbus: nothing is visible but the bus and the name granted" "none" "$(echo "$names" | tr ' ' '\n' | grep -v -x -e org.freedesktop.DBus -e org.freedesktop.Notifications -e '' || echo none)"
+  is "$t --dbus: nothing is visible but the bus and the names granted" "none" "$(echo "$names" | tr ' ' '\n' | grep -v -x -e org.freedesktop.DBus -e org.freedesktop.Notifications -e org.gtk.Notifications -e '' || echo none)"
+  # A grant is the interface named like the bus name, not everything its owner exports.
+  if busctl --user status org.freedesktop.Notifications >/dev/null 2>&1; then
+    has "$t --dbus: the granted name's own interface answers" "s " "$(busctl --address="$filter" call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications GetServerInformation 2>&1)"
+    has "$t --dbus: another interface of the same object is refused" "denied" "$(busctl --address="$filter" call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.DBus.Properties GetAll s org.freedesktop.Notifications 2>&1)"
+  fi
+  if busctl --user introspect org.gtk.Notifications /org/gnome/Mutter/RemoteDesktop 2>/dev/null | grep -q CreateSession; then
+    # gnome-shell owns this name, and has its remote-desktop interface on the same connection
+    has "$t --dbus: the owner's other objects are refused (gnome-shell's remote desktop)" "denied" "$(busctl --address="$filter" introspect org.gtk.Notifications /org/gnome/Mutter/RemoteDesktop 2>&1)"
+  fi
   has "$t --dbus: a call to systemd is refused" "ServiceUnknown" "$(busctl --address="$filter" call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.DBus.Peer Ping 2>&1)"
   has "$t --dbus: so is a call to the secret service" "ServiceUnknown" "$(busctl --address="$filter" call org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.DBus.Peer Ping 2>&1)"
   "$SB" stop "$name" >/dev/null 2>&1
@@ -291,7 +300,7 @@ t="[refusals]"
 name="$prefix-refused"
 boxes+=("$name")
 fake="$tmp/fake-home"
-mkdir -p "$fake/.ssh" "$fake/Projects" "$tmp/runtime" "$tmp/elsewhere"
+mkdir -p "$fake/.ssh" "$fake/Projects/inner" "$tmp/runtime" "$tmp/elsewhere"
 ln -s "$fake/.ssh" "$tmp/to-ssh"
 ln -s "$fake" "$tmp/to-home"
 refused() { # refused "what" args...: create must fail with 125
@@ -312,6 +321,10 @@ refused "sharing a box's home directory" --share "$SECUREBOX_DATA/$name/home"
 refused "sharing nothing (an unset variable)" --share ""
 refused "sharing /etc" --share /etc
 refused "sharing a directory that isn't there" --share "$tmp/nope"
+refused "a share inside a read-write share of the same box" --share "$fake/Projects" --share-ro "$fake/Projects/inner"
+refused "the same share twice" --share "$fake/Projects" --share "$fake/Projects"
+refused "the system's sockets under /run" --share /run/systemd
+refused "a session grant with the host's network" --network host --sound
 refused "talking to systemd on the session bus" --dbus org.freedesktop.systemd1
 refused "a wildcard of names on the session bus" --dbus 'org.freedesktop.*'
 refused "an unknown network" --network bridge
@@ -326,6 +339,42 @@ SECUREBOX_DATA="$fake" HOME="$fake" "$SB" create "$name" "$image" >/dev/null 2>&
 is "$t a data directory that is the home directory" 125 $?
 CONTAINER_HOST="unix:///nowhere" "$SB" list >/dev/null 2>&1
 is "$t a remote podman" 125 $?
+# --wayland takes a socket in the runtime directory, whatever WAYLAND_DISPLAY says
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  for display in pulse ../../../etc /etc/passwd "$tmp/elsewhere"; do
+    WAYLAND_DISPLAY="$display" "$SB" create "$name" "$image" --wayland >/dev/null 2>&1
+    is "$t --wayland with WAYLAND_DISPLAY=$display" 125 $?
+  done
+fi
+is "$t ... and still no container" "no" "$(podman container exists "$name" && echo yes || echo no)"
+
+# What happens around a box, rather than in it.
+t="[lifecycle]"
+name="$prefix-swap"
+boxes+=("$name")
+mkdir -p "$tmp/swap/inner"
+"$SB" create "$name" "$image" --share "$tmp/swap/inner" >/dev/null 2>&1
+out=$("$SB" create "$name" "$image" 2>&1)
+is "$t a name that is taken" 125 $?
+has "$t ... is said to be taken" "already a box named" "$out"
+# A share replaced by a link while the box is stopped: podman would follow it at the start.
+"$SB" stop "$name" >/dev/null 2>&1
+rmdir "$tmp/swap/inner" && ln -s "$tmp/elsewhere" "$tmp/swap/inner"
+out=$("$SB" enter "$name" -- true 2>&1)
+is "$t a box whose share became a link is not started" 125 $?
+has "$t ... and securebox says why" "is not what it was" "$out"
+is "$t ... and it stays stopped" "exited" "$(podman inspect --type container --format '{{.State.Status}}' "$name")"
+"$SB" rm "$name" --purge >/dev/null 2>&1
+
+if command -v xdg-dbus-proxy >/dev/null && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  # A create that fails must not leave a filter for the next box of that name.
+  name="$prefix-failed"
+  boxes+=("$name")
+  "$SB" create "$name" "localhost/$prefix-no-such-image" --dbus org.freedesktop.secrets >/dev/null 2>&1
+  is "$t a create that fails" 125 $?
+  is "$t ... leaves no filter running under the name" "inactive" "$(systemctl --user is-active "securebox-dbus-$name.service" 2>&1)"
+  is "$t ... and nothing in the runtime directory" "gone" "$([ -e "$XDG_RUNTIME_DIR/securebox/$name" ] && echo there || echo gone)"
+fi
 
 # Containers that are not securebox's: a plain one, and one whose image carries the label.
 t="[foreign]"

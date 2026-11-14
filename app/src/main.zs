@@ -30,6 +30,9 @@ let private context () : result<Ctx, string> =
     | (_, Some d) when Path.isAbsolute d -> d + "/securebox"
     | _ -> home + "/.local/share/securebox"
   let dataDir = (Result.mapError (fun e -> $"the data directory: {e}") (Box.dataPath homes (Path.getFullPath data)))?
+  // and not through a link either, once it exists
+  let resolved = Posix.realPath dataDir
+  let _ = (Result.mapError (fun e -> $"the data directory: {e}") (if resolved = "" then Ok dataDir else Box.dataPath homes resolved))?
   let runtime = env "XDG_RUNTIME_DIR"
   let shell = Path.getFileName (env "SHELL")
   let plain c = Char.isLetterOrDigit c || c = '-' || c = '_'
@@ -84,7 +87,8 @@ let rec private createSpec (ctx: Ctx) (spec: CreateSpec) (args: list<Cli.Create.
     let devices = (renderDevices ())?
     createSpec ctx { spec with devices = devices } rest
   | Cli.Create.Wayland :: rest ->
-    let socket = (waylandSocket ())?
+    let named = (waylandSocket ())?
+    let socket = (Commands.wayland ctx named)?
     createSpec ctx { spec with wayland = Some socket } rest
   | Cli.Create.Sound :: rest -> createSpec ctx { spec with sound = true } rest
   | Cli.Create.Dbus n :: rest ->
