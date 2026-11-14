@@ -1,9 +1,10 @@
 # securebox — design
 
-Status: 2026-11-14. Implemented: the five commands and the `--share`, `--share-ro`,
-`--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants, with 158 unit
-tests and an end-to-end script of 253 checks against real podman. The code has had a correctness review
-and an independent security review; appendix D lists what they found and what was done.
+Status: 2026-11-14, released as 0.1.0. Implemented: the five commands and the `--share`,
+`--share-ro`, `--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants,
+with 158 unit tests and an end-to-end script of 253 checks against real podman. The code has
+had a correctness review and two independent security reviews; appendix D lists what they
+found and what was done.
 
 securebox gives you a persistent, interactive Linux box from any container image, the way
 distrobox does, but the box cannot see your home directory or your session unless you share
@@ -635,9 +636,14 @@ zs test                                                     # every member's tes
 cd app && zs build --release --target x86_64-linux-musl     # the static binary
 ```
 
-- The release build is a static binary cross-linked through `zig cc`: 617 KB for x86-64,
-  607 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
-  arguments takes about half a millisecond.
+- The release build is a static binary cross-linked through `zig cc`: 626 KB for x86-64,
+  618 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
+  arguments takes about half a millisecond. Two builds of one commit are the same bytes.
+- A release is made by hand, there is no CI: set the version in `app/zs.toml` and
+  `CHANGELOG.md`, run `zs test`, build the static binary, run `tests/e2e.sh` with
+  `SECUREBOX` set to it, tag `vX.Y.Z`, and attach
+  `securebox-X.Y.Z-x86_64-linux.tar.gz` (the binary, `LICENSE`, `README.md`) and
+  `SHA256SUMS` to the GitHub release. arm64 is not shipped until it has been run on one.
 - Build needs: Z# 0.7.1 (`.toolchain/`, not committed), clang 23+, zig.
 - Runtime needs: podman 5.3 or later (`--hosts-file`), with pasta, its rootless network
   since 5.0. Developed and tested on 6.1 only. No version probe at run time.

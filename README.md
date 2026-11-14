@@ -15,9 +15,24 @@ securebox stop web
 securebox rm web                                       # keeps the box's home; --purge deletes it
 ```
 
-One static binary of about 620 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
+One static binary of about 630 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
 0.7.1. Podman is the only thing it needs at run time, and it is rootless only: securebox
 refuses to run as root.
+
+## Install
+
+The [0.1.0 release](https://github.com/ZigoteProject/securebox/releases/tag/v0.1.0) has a
+static binary for x86-64 Linux:
+
+```sh
+gh release download v0.1.0 --repo ZigoteProject/securebox
+sha256sum --check SHA256SUMS
+tar xzf securebox-0.1.0-x86_64-linux.tar.gz
+install -m 755 securebox-0.1.0-x86_64-linux/securebox ~/.local/bin/
+```
+
+It needs rootless podman 5.3 or later. For arm64, or from source, see [Building](#building).
+[CHANGELOG.md](CHANGELOG.md) has what each release changed.
 
 ## Why
 
