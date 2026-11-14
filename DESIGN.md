@@ -1,8 +1,8 @@
 # securebox — design
 
 Status: 2026-11-14. Implemented: the five commands and the `--share`, `--share-ro`,
-`--network`, `--publish`, `--gpu` and `--wayland` grants, with 125 unit tests and an
-end-to-end script of 193 checks against real podman. The code has had a correctness review
+`--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants, with 136 unit
+tests and an end-to-end script of 214 checks against real podman. The code has had a correctness review
 and an independent security review; appendix D lists what they found and what was done.
 
 securebox gives you a persistent, interactive Linux box from any container image, the way
@@ -16,7 +16,8 @@ securebox enter web                       # a shell; cwd is kept when it is insi
 securebox enter web -- npm test           # one command, exit code passed through
 securebox enter web --root -- apt install -y nodejs
 securebox create api --publish 8080:8080 --gpu
-securebox create gui --wayland            # GUI programs; costs that box its SELinux confinement
+securebox create gui --wayland --sound    # GUI programs with sound; costs that box its SELinux confinement
+securebox create app --dbus org.freedesktop.Notifications   # one name on the session bus, filtered
 securebox list
 securebox stop web
 securebox rm web                          # keeps the box's home; --purge deletes it too
@@ -46,6 +47,7 @@ Non-goals for v1:
 - X11. An X11 socket lets the box log keystrokes and read other windows.
 - An ssh-agent grant. Like Wayland it means a session socket, with the cost section 3
   describes, and unlike Wayland nobody has asked for it.
+- The whole session bus, PipeWire's own socket, and portals. Section 3 says why.
 - Changing a box's grants after creation. Podman fixes mounts at create time; recreate the
   box (its home survives, packages installed into the image layer do not).
 
@@ -127,14 +129,18 @@ podman's own mount and network columns, so the listing cannot drift from reality
 | `--publish [IP:]HOST:BOX[/udp]` (repeatable) | a port; bound to `127.0.0.1` unless an IP is given (podman's own default is all interfaces) |
 | `--gpu` | the GPU's render devices, `/dev/dri/renderD*` (not the display's card nodes) |
 | `--wayland` | the Wayland compositor's socket, for GUI programs; **turns SELinux confinement off for that box** |
+| `--sound` | the sound server's PulseAudio socket: playing and recording; **same cost** |
+| `--dbus NAME` (repeatable) | calls to that one name on the session bus, through a filter; **same cost** |
 
-**What `--wayland` costs.** A GUI program has to connect to the compositor, a process of
-the user's session. Tested on this machine: with the socket bind-mounted into a box,
+**What the session grants cost.** `--wayland`, `--sound` and `--dbus` each mean a socket
+that a process of the user's session listens on, and all three cost the same thing; the
+compositor is the example here. A GUI program has to connect to the compositor, a process
+of the user's session. Tested on this machine: with the socket bind-mounted into a box,
 `connect` fails under SELinux, with and without relabeling the socket file, and succeeds
 with `--security-opt label=disable`. SELinux policy does not let `container_t` connect to
 an unconfined process's socket, and there is no narrower switch. So a box created with
-`--wayland` runs with SELinux labelling disabled (`spc_t`); a box created without it never
-does. Everything else stays as in the table above, which the end-to-end script checks for
+any of the three runs with SELinux labelling disabled (`spc_t`); a box created without
+them never does. Everything else stays as in the table above, which the end-to-end script checks for
 a `--wayland` box too: own home, no capabilities, no-new-privileges, seccomp, the private
 network.
 
@@ -147,7 +153,38 @@ client: `wayland-info` in a Fedora box lists the compositor's interfaces.
 Being a Wayland client is itself a grant: the box can open windows that look like any
 other, and can use whatever protocols the compositor offers every client (on wlroots
 compositors that may include screen capture and clipboard managers; GNOME and KDE restrict
-those). There is no sound, no D-Bus and no portals, and X11-only programs do not run.
+those). X11-only programs do not run.
+
+**`--sound`** mounts the directory of the PulseAudio socket (`$XDG_RUNTIME_DIR/pulse`,
+which PipeWire provides too) read-only into the box's runtime directory and sets
+`PULSE_SERVER`. The directory rather than the socket, so that a sound server that
+restarts is found again. A PulseAudio client can play, and it can record: the microphone,
+and the monitor of what other programs play. PipeWire's own socket is deliberately not
+shared: an unrestricted PipeWire client also sees cameras and screen-sharing streams.
+Verified with a real client: `pactl info` in a Fedora box names the host's server.
+
+**`--dbus NAME`** never gives the box the session bus. Whoever holds that bus can call
+`org.freedesktop.systemd1` and have any command run as the user, or ask the secret service
+for the keyring: the bus is a way out of every other restriction here. So the box gets a
+socket of its own, and between it and the bus runs `xdg-dbus-proxy --filter` with one
+`--talk=NAME` per name granted. Observed through such a filter granted only
+`org.freedesktop.Notifications`: two names visible (the bus itself and that one) of the
+158 on the real bus; calls to systemd and to the secret service fail with
+`ServiceUnknown`; owning a name is refused. Verified with a real client too: `dbus-send`
+in a Fedora box gets the notification server's answer, and is refused systemd.
+
+- A name must be written out (no wildcards), and `org.freedesktop.systemd1` and
+  `org.freedesktop.Flatpak`, which run commands on the host for whoever asks, are refused.
+  Granting any other name is the user's decision about that one service.
+- The filter must outlive securebox, which is gone once it has exec'ed podman, so it runs
+  as a transient unit of the user's systemd (`securebox-dbus-NAME`). `create` and `enter`
+  start it when it is not running; `stop` and `rm` stop it. This grant therefore needs
+  `xdg-dbus-proxy` and a systemd user session on the host.
+- The names are kept in the container's label `securebox.dbus`, read back only for a
+  container already established as the box (section 4) and validated again before use.
+- A program that only needs a bus to exist (to register itself, say) can run one inside
+  the box with `dbus-run-session`; that needs no grant. There are no portals: they treat a
+  caller that is not a Flatpak as a trusted host program.
 
 The GPU needs no such trade because policy allows it (`container_use_dri_devices` is on by
 default).
@@ -173,9 +210,12 @@ podman create
   --network pasta | none | host
   [--publish IP:HOST:BOX]                                   # one per port
   [--device /dev/dri/renderDnnn]                            # one per render node, with --gpu
-  [--security-opt label=disable                             # with --wayland
-   --mount type=tmpfs,dst=/run/user/UID,tmpfs-mode=0700,chown=true
-   --mount type=bind,src=SOCKET,dst=/run/user/UID/wayland-0]
+  [--security-opt label=disable                             # with any session grant
+   --mount type=tmpfs,dst=/run/user/UID,tmpfs-mode=0700,chown=true]
+  [--mount type=bind,src=SOCKET,dst=/run/user/UID/wayland-0]              # --wayland
+  [--mount type=bind,src=RUNTIME/pulse,dst=/run/user/UID/pulse,ro]        # --sound
+  [--label securebox.dbus=NAME,NAME                                       # --dbus
+   --mount type=bind,src=RUNTIME/securebox/NAME,dst=/run/user/UID/dbus,ro]
   IMAGE
 podman start NAME
 podman exec NAME sh -c '…read /etc/passwd…' sh UID USER HOME              # as the user
@@ -202,6 +242,14 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
   programs reading the home from passwd (OpenSSH) find the box's. A box that did not stay
   up makes `create` fail, and say that the image needs a `sleep`.
 - A home directory left by an earlier box of the same name is reused, and `create` says so.
+- With `--dbus`, the filter is started before `podman create`, so that its directory
+  exists to be mounted:
+
+  ```text
+  systemctl --user is-active --quiet securebox-dbus-NAME        # running already?
+  systemd-run --user --quiet --collect --unit securebox-dbus-NAME --
+    xdg-dbus-proxy BUS_ADDRESS RUNTIME/securebox/NAME/bus --filter --talk=NAME…
+  ```
 
 ### enter
 
@@ -211,7 +259,10 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
 2. podman start NAME                       # only when not running
 3. podman exec --interactive [--tty] --detach-keys= [--user 0]
      --env HOME=HOME --env USER=USER --workdir W --env SECUREBOX=NAME
-     [--env XDG_RUNTIME_DIR=/run/user/UID --env WAYLAND_DISPLAY=wayland-0]
+     [--env XDG_RUNTIME_DIR=/run/user/UID]                    # with any session grant
+     [--env WAYLAND_DISPLAY=wayland-0]
+     [--env PULSE_SERVER=unix:/run/user/UID/pulse/native]
+     [--env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/UID/dbus/bus]
      --env TERM --env COLORTERM --env LANG --env LC_ALL
      NAME CMD...
 ```
@@ -233,8 +284,11 @@ podman exec --user 0 NAME sh -c 'sed -i … /etc/passwd' sh UID USER HOME   # on
 - Without `CMD`, the box's shell is found in the box, preferring the host's `$SHELL` name:
   `sh -c 'exec "$(command -v "$0" || command -v bash || echo sh)" -l' zsh`.
 - `HOME` and `USER` are always passed explicitly.
-- A stopped `--wayland` box is started only when the compositor's socket is there;
-  otherwise `enter` says so instead of letting podman fail on the missing mount source.
+- A stopped box with `--wayland` or `--sound` is started only when the compositor's or
+  the sound server's socket is there; otherwise `enter` says so instead of letting podman
+  fail on the missing mount source.
+- For a `--dbus` box, `enter` first makes sure the filter is running, starting it with the
+  names from the box's label when it is not.
 - The exit code is the command's. securebox's own failures exit 125, as podman's do.
 
 ### list, stop, rm
@@ -287,6 +341,9 @@ host paths.
   contain `|`, `&` or `\`, which the `sed` of section 4 would read as syntax.
 - **Data directory:** absolute, and not the home directory or what holds it: `rm --purge`
   deletes `DATA/NAME`.
+- **Bus name (`--dbus`):** a well-known name written out: at least two elements of
+  letters, digits, `_` and `-`, none starting with a digit; no wildcard. Refused:
+  `org.freedesktop.systemd1`, `org.freedesktop.Flatpak`, `org.freedesktop.DBus`.
 - **Network:** one of three words. **Publish:** `[IP:]PORT:PORT[/tcp|/udp]`, IPv4 only.
 - **Remote podman:** with `CONTAINER_HOST` or `CONTAINER_CONNECTION` set, podman talks to a
   service elsewhere, where these paths mean something else; securebox refuses to run.
@@ -335,6 +392,9 @@ effect Host =
   abstract pathExists : string -> bool                                 // a socket, for one
   abstract realPath   : string -> string                               // "" when it isn't there
   abstract ensureDir  : string -> result<unit, string>                 // with parents, mode 0700
+  abstract tool       : string * list<string> -> int                   // systemctl, systemd-run
+  abstract remove     : string -> unit                                 // a file or an empty directory
+  abstract awaitPath  : string -> bool                                 // the filter's socket
   abstract say        : string -> unit                                 // a line for the user
 ```
 
@@ -484,8 +544,8 @@ zs test                                                     # every member's tes
 cd app && zs build --release --target x86_64-linux-musl     # the static binary
 ```
 
-- The release build is a static binary cross-linked through `zig cc`: 340 KB for x86-64,
-  354 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
+- The release build is a static binary cross-linked through `zig cc`: 442 KB for x86-64,
+  448 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
   arguments takes about half a millisecond.
 - Build needs: Z# 0.7.1 (`.toolchain/`, not committed), clang 23+, zig.
 - Runtime needs: podman 5.3 or later (`--hosts-file`), with pasta, its rootless network
@@ -495,16 +555,16 @@ cd app && zs build --release --target x86_64-linux-musl     # the static binary
 
 ## 9. Testing
 
-- **Unit (`zs test`, 125 tests):** validation tables and a property test (no accepted name
+- **Unit (`zs test`, 136 tests):** validation tables and a property test (no accepted name
   starts with `-` or contains `/`); `expect` tests of `createArgs` and `execArgs`, which
-  pin the security flags, and a test that labelling is never off without `--wayland`; the
+  pin the security flags, and a test that labelling is never off without a session grant; the
   ownership check against an image's label, another data directory and an id prefix; the
   command flows under the recording `Host` handler; argz parse tables and `expect` tests
   of usage text; the posix functions.
-- **End to end (`tests/e2e.sh`, 193 checks):** the built binary against real podman, on
+- **End to end (`tests/e2e.sh`, 214 checks):** the built binary against real podman, on
   Fedora, Ubuntu and Alpine images: every row of section 3's table probed from inside the
-  box, shares, exit codes, the lifecycle, the grants (a `--wayland` box included, where a
-  compositor is running), refusals, and containers that are not securebox's. It keeps its
+  box, shares, exit codes, the lifecycle, the grants (the session grants included, where
+  the session has a compositor, a sound server and a bus), refusals, and containers that are not securebox's. It keeps its
   boxes' data in a temporary `SECUREBOX_DATA`, tries the refusals against a home directory
   it made, and removes everything. This script is the acceptance test for "secure by
   default".
@@ -519,7 +579,7 @@ that cannot work. The first version of the script had no such control and could 
 |---|---|---|
 | M0 ✅ | Spikes: the argz derive with subcommands; `exec` of `podman exec -it` through the C shim; a static musl build | done 2026-11-14, appendix B |
 | M1 ✅ | `create`, `enter`, `list`, `stop`, `rm`; `--share`, `--share-ro`, `--network`; tests | done: the end-to-end script passes on three images |
-| M2 ✅ | `--publish`, `--gpu`, `--wayland`; the passwd fix-up for images with a clashing uid | done; `--wayland` at the cost section 3 states, `--ssh-agent` not built |
+| M2 ✅ | `--publish`, `--gpu`, `--wayland`, `--sound`, `--dbus`; the passwd fix-up for images with a clashing uid | done; the session grants at the cost section 3 states, `--ssh-agent` not built |
 | Review ✅ | a correctness review and an independent security review | done 2026-11-14; appendix D |
 
 ## 11. Open questions and known limits
@@ -540,7 +600,8 @@ that cannot work. The first version of the script had no such control and could 
    logging out and in it has the old socket until `securebox stop NAME` and a new `enter`.
 7. **`list` trusts the label.** It is `podman ps` filtered by label, so a container made
    from an image that carries `LABEL securebox=1` shows up in it. No command acts on one.
-8. **No sound, D-Bus or portals** in any box.
+8. **No portals** in any box, and no bus name can be owned on the session bus.
+9. **A filter's names are fixed at create,** like every grant.
 
 ## Appendix A: what was verified, and how
 
@@ -607,7 +668,8 @@ What Z# 0.7.1 does that the design had to follow, for whoever writes M1:
 ## Appendix C: end-to-end results
 
 `tests/e2e.sh` on podman 6.1.3 (rootless, crun, pasta, SELinux enforcing, a GNOME Wayland
-session), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 193 passed, 0 failed.
+session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 214 passed,
+0 failed.
 
 Per image: the home starts empty; the uid, `HOME` and passwd entry; zero capabilities,
 no-new-privileges, seccomp and `container_t`; no `/run/user` or `/run/host`, no host
@@ -620,14 +682,18 @@ files included.
 Once: `--network host` as the control for the network checks; `--network none`; the
 host's proxy variables kept out; `--gpu` with render nodes only; a `--wayland` box (the
 socket alone in a private runtime directory, the compositor answering, capabilities and
-no-new-privileges unchanged); nineteen refusals, those about the home against a fake one (the home under each
+no-new-privileges unchanged); a `--sound` box (the socket's directory alone, read-only,
+the server answering); a `--dbus` box (the filter running as a user unit, only the granted
+name visible through it, systemd and the secret service refused, the filter stopped by
+`stop`, restarted by `enter`, gone after `rm`); twenty-one refusals, those about the home against a fake one (the home under each
 name, links to it, the runtime and data directories, an empty path, a remote podman, …);
 two foreign containers, one from an image carrying the label, left alone by `enter`,
 `stop`, `rm` and `rm --purge` together with the directories of their names; a directory
 that was never a box not purged.
 
-Separately, by hand: `wayland-info` installed in a Fedora `--wayland` box lists the
-compositor's interfaces.
+Separately, by hand, with clients installed in a Fedora box: `wayland-info` lists the
+compositor's interfaces; `pactl info` names the host's sound server; `dbus-send` gets an
+answer from the granted name and `ServiceUnknown` from systemd.
 
 Entering a running box, median of 15 runs on this machine before the review changes:
 `podman exec NAME true` takes 227 ms and `securebox enter NAME -- true` 268 ms. The 40 ms

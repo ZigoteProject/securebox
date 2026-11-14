@@ -13,6 +13,8 @@ module Create =
     | Publish of string
     | Gpu
     | Wayland
+    | Sound
+    | Dbus of string
 
   let spec a =
     match a with
@@ -24,6 +26,8 @@ module Create =
     | Publish _ -> { help = "publish a port, [IP:]HOST:BOX[/udp]; on 127.0.0.1 unless IP is given (repeatable)"; short = Some 'p' }
     | Gpu -> { help = "give the box the GPU's render devices (/dev/dri/renderD*)" }
     | Wayland -> { help = "let GUI programs reach the Wayland compositor; SELinux confinement is off for such a box" }
+    | Sound -> { help = "let programs play and record sound (PulseAudio socket); SELinux confinement off, as for --wayland" }
+    | Dbus _ -> { help = "let the box talk to this session-bus name, through a filter (repeatable); SELinux confinement off" }
 
 module Enter =
   [<Derive(Arg)>]

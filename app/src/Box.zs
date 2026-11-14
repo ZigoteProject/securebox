@@ -18,7 +18,11 @@ type CreateSpec =
     /// The GPU's render devices (`--gpu`).
     devices: list<string> = []
     /// The compositor's socket on the host (`--wayland`).
-    wayland: option<string> = None }
+    wayland: option<string> = None
+    /// The directory of the sound server's PulseAudio socket on the host (`--sound`).
+    sound: option<string> = None
+    /// The names on the session bus the box may talk to (`--dbus`).
+    dbus: list<string> = [] }
 
 /// What securebox reads from its environment, once.
 type Ctx =
@@ -35,6 +39,10 @@ type Ctx =
     /// Directories no share may be, hold or be inside: securebox's data and the session's
     /// runtime directory.
     offLimits: list<string>
+    /// The session's runtime directory on the host (`$XDG_RUNTIME_DIR`), "" when there is none.
+    runtime: string
+    /// The session bus's address (`$DBUS_SESSION_BUS_ADDRESS`), "" when there is none.
+    busAddress: string
     cwd: string
     /// The name of the user's shell (`zsh`), looked for in the box.
     shell: string
@@ -127,6 +135,20 @@ let sharePath (ctx: Ctx) (path: string) : result<string, string> =
       refuse "dot-directories of your home hold credentials and host configuration"
     else
       Ok path
+
+/// A name on the session bus the box may talk to: a well-known name, written out (no
+/// wildcard), and not one of those that run commands on the host for whoever asks.
+let busName (s: string) : result<string, string> =
+  let element (e: string) =
+    match String.chars e with
+    | first :: rest -> (Char.isLetter first || first = '_') && List.forall (fun c -> Char.isLetterOrDigit c || c = '_' || c = '-') rest
+    | [] -> false
+  let elements = String.split "." s
+  if List.length elements < 2 || String.length s > 255 || not (List.forall element elements) then
+    Error $"'{s}' is not a name on the session bus: write one out, as org.freedesktop.Notifications"
+  else if List.contains s [ "org.freedesktop.systemd1"; "org.freedesktop.Flatpak"; "org.freedesktop.DBus" ] then
+    Error $"refusing to let a box talk to {s}: it runs commands on the host for whoever asks"
+  else Ok s
 
 let network (s: string) : result<Network, string> =
   match s with

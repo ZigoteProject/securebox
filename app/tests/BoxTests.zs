@@ -63,6 +63,12 @@ let tests =
       assert (Box.dataPath ctx.homes "/srv/boxes" = Ok "/srv/boxes")
       for d in [ "/"; "/home"; "/home/ada"; "/var/home/ada"; "/var"; "relative"; "/srv/a,b" ] do
         assert (Result.isError (Box.dataPath ctx.homes d)))
+    test "a name on the session bus is written out, and is not one that runs commands on the host" (fun () ->
+      for n in [ "org.freedesktop.Notifications"; "org.kde.StatusNotifierWatcher"; "com.example.my-app._1" ] do
+        assert (Box.busName n = Ok n)
+      for n in [ ""; "org"; "org."; ".org.x"; "org..x"; "org.freedesktop.*"; "*"; "org.1x"; "org.x y"; "--talk=org.x"; "org.x,org.y"
+                 "org.freedesktop.systemd1"; "org.freedesktop.Flatpak"; "org.freedesktop.DBus"; ":1.42" ] do
+        assert (Result.isError (Box.busName n)))
     test "network" (fun () ->
       assert (Box.network "private" = Ok Private && Box.network "none" = Ok NoNetwork && Box.network "host" = Ok HostNetwork)
       assert (Result.isError (Box.network "bridge")))

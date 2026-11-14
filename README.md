@@ -9,13 +9,13 @@ securebox create web docker.io/library/ubuntu:24.04 --share ~/Projects/web
 securebox enter web                                    # a shell; the working directory is kept inside a share
 securebox enter web -- npm test                        # one command; its exit code is securebox's
 securebox enter web --root -- apt install -y nodejs    # root, granted from the host side
-securebox create gui --wayland                         # GUI programs (see what it costs, below)
+securebox create gui --wayland --sound                 # GUI programs with sound (see what it costs, below)
 securebox list
 securebox stop web
 securebox rm web                                       # keeps the box's home; --purge deletes it
 ```
 
-One static binary of about 340 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
+One static binary of about 440 KB, written in [Z#](https://github.com/ZigoteProject/zsharp)
 0.7.1. Podman is the only thing it needs at run time, and it is rootless only: securebox
 refuses to run as root.
 
@@ -77,7 +77,12 @@ All off by default, all given to `create`, all visible in `securebox list`.
 | `--network host` | the host's network namespace, loopback included |
 | `-p`, `--publish [IP:]HOST:BOX[/udp]` | a port, bound to `127.0.0.1` unless you give an address (repeatable) |
 | `--gpu` | the GPU's render devices (`/dev/dri/renderD*`) |
-| `--wayland` | the Wayland compositor's socket, for GUI programs; **SELinux confinement is off for that box** |
+| `--wayland` | the Wayland compositor's socket, for GUI programs (*) |
+| `--sound` | the sound server's PulseAudio socket: playing and recording (*) |
+| `--dbus NAME` | calls to that one name on your session bus, through a filter (repeatable) (*) |
+
+(*) These three reach into your desktop session, and on an SELinux host a box with any of
+them runs **without SELinux confinement**. See below.
 
 securebox refuses to share your home directory, anything that contains it, system
 directories, your session's runtime directory (`/run/user/UID`), its own data, and
@@ -86,22 +91,35 @@ to, so a symbolic link to any of those is refused too. On an SELinux host, shari
 directory relabels it for containers, permanently; that is harmless for a project
 directory.
 
-### GUI programs: `--wayland`
+### Desktop programs: `--wayland`, `--sound`, `--dbus`
 
-A box created with `--wayland` gets a private runtime directory holding one thing, the
-compositor's socket, and `enter` sets `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`. Wayland
-programs then open their windows on your desktop; add `--gpu` for accelerated rendering.
+A box created with any of these gets a private runtime directory (`XDG_RUNTIME_DIR`) that
+holds only what was granted, and `enter` tells programs where each thing is.
+
+- **`--wayland`**: the compositor's socket. Wayland programs open their windows on your
+  desktop; add `--gpu` for accelerated rendering. A Wayland client can do what the
+  compositor lets any client do; on GNOME and KDE that excludes capturing the screen.
+- **`--sound`**: the PulseAudio socket, which PipeWire provides too. Programs can play
+  sound, and also **record**: the microphone, and what other programs are playing.
+  PipeWire's own socket is not shared, so cameras and screen sharing stay out of reach.
+- **`--dbus NAME`**: the box may call that one name on your session bus, for instance
+  `--dbus org.freedesktop.Notifications`. It never gets the bus itself. Whoever holds the
+  session bus can ask systemd to run any command as you, or ask the keyring for your
+  passwords, so securebox runs a filter (`xdg-dbus-proxy`) between the bus and the box
+  that lets through only the names you granted, and refuses outright to grant the names
+  that run commands on the host. A program that only needs *a* bus of its own can start
+  one inside the box (`dbus-run-session`), which needs no grant.
 
 The cost, on an SELinux host: SELinux does not let a confined container connect to a
-socket of your session, and there is no narrower switch, so such a box runs with SELinux
-labelling disabled. Its other protections are unchanged (own home, no capabilities,
-no-new-privileges, seccomp, private network, none of the session's other sockets), and
-boxes created without the flag keep their confinement. A Wayland client can also do what
-the compositor lets any client do; on GNOME and KDE that excludes capturing the screen.
+socket of your session, and there is no narrower switch, so a box with any of these runs
+with SELinux labelling disabled. Its other protections are unchanged (own home, no
+capabilities, no-new-privileges, seccomp, private network, nothing else of the session),
+and boxes created without these flags keep their confinement.
 
-A `--wayland` box needs the compositor running to start, and after you log out and in
-again it needs `securebox stop NAME` before the next `enter`. There is no sound, no D-Bus
-and no portals, and X11-only programs do not run.
+Such a box needs what it was granted in order to start (the compositor, the sound server),
+and after you log out and in again a `--wayland` box needs `securebox stop NAME` before
+the next `enter`. `--dbus` needs `xdg-dbus-proxy` and a systemd user session on the host.
+There are no portals, and X11-only programs do not run.
 
 Grants are fixed when the box is created. To change them, remove the box and create it
 again: its home directory survives (`rm` keeps it, and `create` picks it up), packages
@@ -129,8 +147,8 @@ cp build/securebox ~/.local/bin/
 ## Testing
 
 ```sh
-zs test            # 125 unit tests: validation, the exact podman arguments, the command flows
-tests/e2e.sh       # 193 checks with real podman, on Fedora, Ubuntu and Alpine images
+zs test            # 136 unit tests: validation, the exact podman arguments, the command flows
+tests/e2e.sh       # 214 checks with real podman, on Fedora, Ubuntu and Alpine images
 ```
 
 The end-to-end script creates boxes named `sbx-e2e-<pid>-*`, keeps their data in a

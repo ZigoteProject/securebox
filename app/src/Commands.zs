@@ -65,14 +65,48 @@ let private settle (ctx: Ctx) (name: string) : result<unit, string> =
         Ok ()
     | _ -> Error $"the box '{name}' did not stay up: its image needs a 'sleep' that takes 'infinity'. Remove it with: securebox rm {name}"
 
+/// Makes sure a `--dbus` box's filter is running: started through the user's systemd,
+/// which keeps it when securebox is gone. `names` is asked for only when it must be started.
+let private filtered (ctx: Ctx) (name: string) (names: unit -> result<list<string>, string>) : result<unit, string> =
+  if ctx.runtime = "" || ctx.busAddress = "" || String.startsWith "-" ctx.busAddress then
+    Error "--dbus needs your session bus, and there is none here (XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS is not set)"
+  else if Host.tool ("systemctl", proxyActiveArgs name) = 0 then Ok ()
+  else
+    match names () with
+    | Error e -> Error e
+    | Ok granted ->
+      let socket = hostBusDir ctx name + "/bus"
+      match Host.ensureDir (hostBusDir ctx name) with
+      | Error e -> Error e
+      | Ok () ->
+        Host.remove socket       // one a filter that was killed left
+        if Host.tool ("systemd-run", proxyStartArgs ctx name granted) <> 0 then
+          Error "the D-Bus filter could not be started: --dbus needs xdg-dbus-proxy and a systemd user session (systemd-run --user)"
+        else if Host.awaitPath socket then Ok ()
+        else Error "the D-Bus filter was started but is not listening"
+
+/// The names a `--dbus` box was created with, read back from its label and checked again.
+let private busNames (name: string) () : result<list<string>, string> =
+  match podman (busLabelArgs name) $"cannot read the D-Bus names of the box '{name}'" with
+  | Error e -> Error e
+  | Ok label ->
+    let names = List.filter (fun n -> n <> "") (String.split "," (String.trim label))
+    if names <> [] && List.forall (fun n -> Result.isOk (busName n)) names then Ok names
+    else Error $"the box '{name}' has no usable list of D-Bus names; create it again with --dbus"
+
 let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
-  let absent = Option.exists (fun socket -> not (Host.pathExists socket)) spec.wayland
-  match spec.wayland with
-  | Some socket when absent -> Error $"--wayland: there is no compositor socket at {socket}"
-  | _ ->
+  let needs =
+    List.concat [
+      Option.toList (Option.map (fun s -> ("--wayland: there is no compositor socket at ", s)) spec.wayland)
+      Option.toList (Option.map (fun d -> ("--sound: there is no sound server socket at ", d + "/native")) spec.sound) ]
+  let lacking = List.filter (fun (_, path) -> not (Host.pathExists path)) needs
+  match lacking with
+  | (what, path) :: _ -> Error (what + path)
+  | [] ->
     let home = boxHome ctx spec.name
     let kept = Host.dirExists home
     let _ = (Host.ensureDir home)?
+    let _ = (if spec.dbus = [] then Ok () else filtered ctx spec.name (fun () -> Ok spec.dbus))?
     let _ = (podman (createArgs ctx spec) $"podman could not create the box '{spec.name}'")?
     let _ = (podman (startArgs spec.name) $"the box '{spec.name}' was created but did not start")?
     let _ = (settle ctx spec.name)?
@@ -83,23 +117,30 @@ let create (ctx: Ctx) (spec: CreateSpec) : result<int, string> =
 
 let enter (ctx: Ctx) (name: string) (root: bool) (cmd: list<string>) : result<int, string> =
   let state = (find ctx name)?
-  let socket = waylandSource ctx state
-  let absent = Option.exists (fun s -> not (Host.pathExists s)) socket
+  // what the session must have for the box's grants: the filter always, the rest to start it
+  let _ = (if hasBus ctx state then filtered ctx name (busNames name) else Ok ())?
+  let lacking = if state.running then [] else List.filter (fun (_, path) -> not (Host.pathExists path)) (sessionNeeds ctx state)
   let started =
-    if state.running then Ok ""
-    else
-      match socket with
-      | Some s when absent ->
-        Error $"the box '{name}' was created with --wayland, and the compositor's socket {s} is not there: start it from your graphical session"
-      | _ -> podman (startArgs name) $"the box '{name}' did not start"
+    match lacking with
+    | (what, path) :: _ -> Error $"the box '{name}' was created with {what}, and {path} is not there: start it from your graphical session"
+    | [] -> if state.running then Ok "" else podman (startArgs name) $"the box '{name}' did not start"
   let _ = started?
-  Ok (Host.exec (execArgs ctx name root (Option.isSome socket) (workdir ctx (shares ctx state)) cmd))
+  Ok (Host.exec (execArgs ctx name root (sessionEnv ctx state) (workdir ctx (shares ctx state)) cmd))
 
 let list () : result<int, string> = Ok (Host.exec listArgs)
+
+/// A stopped box needs no D-Bus filter, and a removed one no place for it either.
+let private unfiltered (ctx: Ctx) (name: string) (state: BoxState) (removed: bool) =
+  if hasBus ctx state then
+    Host.tool ("systemctl", proxyStopArgs name) |> ignore
+    if removed && ctx.runtime <> "" then
+      Host.remove (hostBusDir ctx name + "/bus")
+      Host.remove (hostBusDir ctx name)
 
 let stop (ctx: Ctx) (name: string) : result<int, string> =
   let state = (find ctx name)?
   let stopped = if state.running then podman (stopArgs name) $"the box '{name}' did not stop" else Ok ""
+  unfiltered ctx name state false
   Result.map (fun _ -> 0) stopped
 
 let private purged (ctx: Ctx) (name: string) (failure: string) : result<int, string> =
@@ -117,10 +158,11 @@ let rm (ctx: Ctx) (name: string) (purge: bool) : result<int, string> =
   | Ok Missing ->
     // the container is gone already: what it left can still be purged, when it is a box's
     if purge && Host.dirExists (boxHome ctx name) then purged ctx name $"could not delete {dir}" else Error (missing name)
-  | Ok (Ours _) ->
+  | Ok (Ours state) ->
     match podman (rmArgs name) $"the box '{name}' was not removed" with
     | Error e -> Error e
     | Ok _ ->
+      unfiltered ctx name state true
       if purge then purged ctx name $"the box is removed, but {dir} could not be deleted"
       else
         if Host.dirExists dir then

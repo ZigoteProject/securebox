@@ -8,6 +8,7 @@ let ctx : Ctx =
     homes = [ "/home/ada"; "/var/home/ada" ]
     dataDir = "/home/ada/.local/share/securebox"
     offLimits = [ "/home/ada/.local/share/securebox"; "/run/user/1000" ]
+    runtime = "/run/user/1000"; busAddress = "unix:path=/run/user/1000/bus"
     cwd = "/home/ada/Projects/web/src"
     shell = "zsh"; tty = true; passEnv = [ "TERM"; "LANG" ] }
 
@@ -15,7 +16,8 @@ let ctx : Ctx =
 let links = [ ("/srv/to-ssh", "/var/home/ada/.ssh"); ("/srv/to-web", "/home/ada/Projects/web") ]
 
 /// Runs `app` with podman answered by `answer` (from its arguments) and the paths in
-/// `present` existing: the result, and what was asked of the host, in order.
+/// `present` existing: the result, and what was asked of the host, in order. A box's D-Bus
+/// filter is running when `present` has "filter".
 let record (answer: list<string> -> ProcessResult) (present: list<string>) (app: unit -> 'a) =
   let mutable calls = []
   let result =
@@ -35,6 +37,13 @@ let record (answer: list<string> -> ProcessResult) (present: list<string>) (app:
     | Host.ensureDir path, k ->
       calls <- ("mkdir " + path) :: calls
       k (Ok ())
+    | Host.tool (program, args), k ->
+      calls <- (program + " " + String.join " " args) :: calls
+      k (if List.contains "is-active" args && not (List.contains "filter" present) then 3 else 0)
+    | Host.remove path, k ->
+      calls <- ("remove " + path) :: calls
+      k ()
+    | Host.awaitPath _, k -> k true
     | Host.say _, k -> k ()
   (result, List.rev calls)
 

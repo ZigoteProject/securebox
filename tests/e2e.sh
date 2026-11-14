@@ -218,6 +218,51 @@ if [ -S "$socket" ]; then
   "$SB" rm "$name" --purge >/dev/null 2>&1
 fi
 
+pulse="${XDG_RUNTIME_DIR:-}/pulse/native"
+if [ -S "$pulse" ]; then
+  name="$prefix-sound"
+  boxes+=("$name")
+  "$SB" create "$name" "$image" --sound >/dev/null 2>&1
+  is "$t --sound: create" 0 $?
+  is "$t --sound: PULSE_SERVER is the socket in the box's own runtime directory" "socket" "$(box 'test -S "${PULSE_SERVER#unix:}" && echo socket')"
+  is "$t --sound: that directory holds nothing else of the session" "pulse" "$(box 'ls -A "$XDG_RUNTIME_DIR" | tr "\n" " " | sed "s/ $//"')"
+  has "$t --sound: the socket's directory is read-only" "denied" "$(box 'touch "$XDG_RUNTIME_DIR/pulse/x" 2>/dev/null || echo denied')"
+  if [ "$(box 'command -v curl >/dev/null && echo yes')" = yes ]; then
+    box 'curl -s -m 3 --unix-socket "${PULSE_SERVER#unix:}" http://x/ >/dev/null 2>&1; [ $? -ne 7 ]'
+    is "$t --sound: the sound server can be connected to" 0 $?
+  fi
+  has "$t --sound: still no capabilities" "CapEff:	0000000000000000" "$(box 'cat /proc/self/status')"
+  "$SB" rm "$name" --purge >/dev/null 2>&1
+fi
+
+if command -v xdg-dbus-proxy >/dev/null && command -v busctl >/dev/null && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  name="$prefix-dbus"
+  boxes+=("$name")
+  unit="securebox-dbus-$name"
+  "$SB" create "$name" "$image" --dbus org.freedesktop.Notifications >/dev/null 2>&1
+  is "$t --dbus: create" 0 $?
+  is "$t --dbus: the filter runs as a unit of the user's" "active" "$(systemctl --user is-active "$unit" 2>&1)"
+  is "$t --dbus: the box is told where the filtered bus is" "socket" "$(box 'test -S "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" && echo socket')"
+  is "$t --dbus: the session bus itself is not in the box" "absent" "$(box 'ls -d /run/user/*/bus 2>/dev/null || echo absent')"
+  if [ "$(box 'command -v curl >/dev/null && echo yes')" = yes ]; then
+    box 'curl -s -m 3 --unix-socket "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" http://x/ >/dev/null 2>&1; [ $? -ne 7 ]'
+    is "$t --dbus: the filter can be connected to" 0 $?
+  fi
+  # From the host, through the same socket the box has: what the filter lets through.
+  filter="unix:path=$XDG_RUNTIME_DIR/securebox/$name/bus"
+  names=$(busctl --address="$filter" list --no-legend 2>/dev/null | awk '{print $1}' | grep -v '^:' | sort | tr '\n' ' ')
+  has "$t --dbus: the bus is reachable through the filter" "org.freedesktop.DBus " "$names"
+  hasnt "$t --dbus: systemd is not visible through it" "org.freedesktop.systemd1" "$names"
+  is "$t --dbus: nothing is visible but the bus and the name granted" "none" "$(echo "$names" | tr ' ' '\n' | grep -v -x -e org.freedesktop.DBus -e org.freedesktop.Notifications -e '' || echo none)"
+  has "$t --dbus: a call to systemd is refused" "ServiceUnknown" "$(busctl --address="$filter" call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.DBus.Peer Ping 2>&1)"
+  has "$t --dbus: so is a call to the secret service" "ServiceUnknown" "$(busctl --address="$filter" call org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.DBus.Peer Ping 2>&1)"
+  "$SB" stop "$name" >/dev/null 2>&1
+  is "$t --dbus: stop stops the filter" "inactive" "$(systemctl --user is-active "$unit" 2>&1)"
+  is "$t --dbus: enter starts it again" "active" "$(box 'true'; systemctl --user is-active "$unit" 2>&1)"
+  "$SB" rm "$name" --purge >/dev/null 2>&1
+  is "$t --dbus: rm stops it and clears its place" "inactive gone" "$(systemctl --user is-active "$unit" 2>&1) $([ -e "$XDG_RUNTIME_DIR/securebox/$name" ] && echo there || echo gone)"
+fi
+
 # Refusals. They are tried against a home directory made for the test, so that a check that
 # stopped working cannot share (and relabel) the real one.
 t="[refusals]"
@@ -245,6 +290,8 @@ refused "sharing a box's home directory" --share "$SECUREBOX_DATA/$name/home"
 refused "sharing nothing (an unset variable)" --share ""
 refused "sharing /etc" --share /etc
 refused "sharing a directory that isn't there" --share "$tmp/nope"
+refused "talking to systemd on the session bus" --dbus org.freedesktop.systemd1
+refused "a wildcard of names on the session bus" --dbus 'org.freedesktop.*'
 refused "an unknown network" --network bridge
 refused "a port that isn't one" --publish 80
 refused "an option podman would take" --privileged

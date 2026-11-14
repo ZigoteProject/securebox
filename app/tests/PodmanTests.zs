@@ -88,11 +88,44 @@ let tests =
         type=tmpfs,dst=/run/user/1000,tmpfs-mode=0700,chown=true
         type=bind,src=/run/user/1000/wayland-1,dst=/run/user/1000/wayland-0
         """)
-    test "labelling is never off without --wayland" (fun () ->
+    test "create --sound: the PulseAudio socket's directory, read-only" (fun () ->
+      let plain = createArgs ctx { name = "gui"; image = "fedora:45" }
+      let sound = createArgs ctx { name = "gui"; image = "fedora:45"; sound = Some "/run/user/1000/pulse" }
+      expect (lines (List.filter (fun a -> not (List.contains a plain)) sound)) """
+        label=disable
+        type=tmpfs,dst=/run/user/1000,tmpfs-mode=0700,chown=true
+        type=bind,src=/run/user/1000/pulse,dst=/run/user/1000/pulse,ro
+        """)
+    test "create --dbus: the filter's directory and the names, never the session bus itself" (fun () ->
+      let plain = createArgs ctx { name = "gui"; image = "fedora:45" }
+      let dbus = createArgs ctx { name = "gui"; image = "fedora:45"; dbus = [ "org.freedesktop.Notifications"; "org.example.App" ] }
+      expect (lines (List.filter (fun a -> not (List.contains a plain)) dbus)) """
+        label=disable
+        type=tmpfs,dst=/run/user/1000,tmpfs-mode=0700,chown=true
+        securebox.dbus=org.freedesktop.Notifications,org.example.App
+        type=bind,src=/run/user/1000/securebox/gui,dst=/run/user/1000/dbus,ro
+        """
+      assert (not (List.exists (String.contains "/run/user/1000/bus") dbus)))
+    test "the D-Bus filter: only the names granted are let through" (fun () ->
+      expect (lines (proxyStartArgs ctx "gui" [ "org.freedesktop.Notifications"; "org.example.App" ])) """
+        --user
+        --quiet
+        --collect
+        --unit
+        securebox-dbus-gui
+        --
+        xdg-dbus-proxy
+        unix:path=/run/user/1000/bus
+        /run/user/1000/securebox/gui/bus
+        --filter
+        --talk=org.freedesktop.Notifications
+        --talk=org.example.App
+        """)
+    test "labelling is never off without a session grant" (fun () ->
       let every = createArgs ctx { name = "web"; image = "x"; shares = [ { path = "/srv/data"; readOnly = false } ]
                                    network = HostNetwork; publish = [ "127.0.0.1:1:1" ]; devices = [ "/dev/dri/renderD128" ] }
       assert (not (List.exists (String.startsWith "label=") every)))
-    test "enter: a shell" (fun () -> expect (lines (execArgs ctx "dev" false false "/home/ada" [])) """
+    test "enter: a shell" (fun () -> expect (lines (execArgs ctx "dev" false [] "/home/ada" [])) """
                                        exec
                                        --interactive
                                        --tty
@@ -116,7 +149,7 @@ let tests =
                                        zsh
                                        """)
     test "enter: a command as root, without a terminal" (fun () ->
-      expect (lines (execArgs { ctx with tty = false; passEnv = [] } "dev" true false "/srv/data" [ "dnf"; "install"; "-y"; "git" ])) """
+      expect (lines (execArgs { ctx with tty = false; passEnv = [] } "dev" true [] "/srv/data" [ "dnf"; "install"; "-y"; "git" ])) """
         exec
         --interactive
         --detach-keys=
@@ -136,10 +169,22 @@ let tests =
         -y
         git
         """)
-    test "enter a --wayland box: where the socket is" (fun () ->
-      let plain = execArgs ctx "gui" false false "/home/ada" [ "foot" ]
-      let wayland = execArgs ctx "gui" false true "/home/ada" [ "foot" ]
-      assert (List.filter (fun a -> not (List.contains a plain)) wayland = [ "XDG_RUNTIME_DIR=/run/user/1000"; "WAYLAND_DISPLAY=wayland-0" ]))
+    test "a box with session grants is told where they are" (fun () ->
+      let state mounts = parseInspect (Fixture.inspected "gui" "running" "\"1\"" mounts)
+      let wayland = ("/run/user/1000/wayland-1", "/run/user/1000/wayland-0")
+      let sound = ("/run/user/1000/pulse", "/run/user/1000/pulse")
+      let bus = ("/run/user/1000/securebox/gui", "/run/user/1000/dbus")
+      assert (sessionEnv ctx (state [ dev ]) = [])
+      assert (sessionEnv ctx (state [ wayland ]) = [ "XDG_RUNTIME_DIR=/run/user/1000"; "WAYLAND_DISPLAY=wayland-0" ])
+      assert (sessionEnv ctx (state [ wayland; sound; bus ])
+              = [ "XDG_RUNTIME_DIR=/run/user/1000"; "WAYLAND_DISPLAY=wayland-0"; "PULSE_SERVER=unix:/run/user/1000/pulse/native"
+                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/dbus/bus" ])
+      assert (hasBus ctx (state [ bus ]) && not (hasBus ctx (state [ wayland; sound ])))
+      assert (List.map snd (sessionNeeds ctx (state [ wayland; sound; bus ])) = [ "/run/user/1000/wayland-1"; "/run/user/1000/pulse/native" ])
+      // none of them is a share, though the sound directory has one path on both sides
+      assert (shares ctx (state [ dev; wayland; sound; bus; ("/srv/data", "/srv/data") ]) = [ "/srv/data" ])
+      let told = execArgs ctx "gui" false (sessionEnv ctx (state [ wayland ])) "/home/ada" [ "foot" ]
+      assert (String.contains "--env XDG_RUNTIME_DIR=/run/user/1000 --env WAYLAND_DISPLAY=wayland-0 " (String.join " " told)))
     test "inspect's output" (fun () ->
       let state = parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev; ("/srv/data", "/srv/data") ])
       let mounted = state.mounts = [ dev; ("/srv/data", "/srv/data") ]
@@ -164,8 +209,8 @@ let tests =
       let socket = ("/run/user/1000/wayland-1", "/run/user/1000/wayland-0")
       let state = parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev; ("/srv/data", "/srv/data"); ("tmpfs", "/run/user/1000"); socket ])
       assert (shares ctx state = [ "/srv/data" ])
-      assert (waylandSource ctx state = Some "/run/user/1000/wayland-1")
-      assert (waylandSource ctx (parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev ])) = None)
+      assert (List.map snd (sessionNeeds ctx state) = [ "/run/user/1000/wayland-1" ])
+      assert (sessionNeeds ctx (parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev ])) = [])
       // the socket named the same on both sides is still not a share
       let same = parseInspect (Fixture.inspected "dev" "running" "\"1\"" [ dev; ("/run/user/1000/wayland-0", "/run/user/1000/wayland-0") ])
       assert (shares ctx same = []))

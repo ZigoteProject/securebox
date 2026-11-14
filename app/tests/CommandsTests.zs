@@ -106,6 +106,52 @@ let tests =
       assert (Result.isError stopped && steps stoppedCalls = [ "inspect" ])
       let (there, thereCalls) = record (dev "exited" [ socket ]) [ "/run/user/1000/wayland-1" ] (fun () -> Commands.enter ctx "dev" false [])
       assert (there = Ok 0 && steps thereCalls = [ "inspect"; "start"; "podman" ]))
+    test "create --sound without a sound server stops before podman" (fun () ->
+      let spec = { name = "gui"; image = "fedora:45"; sound = Some "/run/user/1000/pulse" }
+      let (r, calls) = record (box "") [] (fun () -> Commands.create ctx spec)
+      assert (r = Error "--sound: there is no sound server socket at /run/user/1000/pulse/native" && calls = []))
+    test "create --dbus: the filter is running before the box is made" (fun () ->
+      let spec = { name = "dev"; image = "fedora:45"; dbus = [ "org.freedesktop.Notifications" ] }
+      let (r, calls) = record (box "") [] (fun () -> Commands.create ctx spec)
+      assert (r = Ok 0)
+      assert (steps calls = [ $"{dir}/home"; "--user"; "/run/user/1000/securebox/dev"; "/run/user/1000/securebox/dev/bus"; "--user"; "create"; "start"; "exec" ])
+      assert (ran "systemctl --user is-active --quiet securebox-dbus-dev" calls)
+      assert (List.exists (String.endsWith "--filter --talk=org.freedesktop.Notifications") calls))
+    test "create --dbus without a session bus is refused" (fun () ->
+      let spec = { name = "dev"; image = "fedora:45"; dbus = [ "org.freedesktop.Notifications" ] }
+      let (r, calls) = record (box "") [] (fun () -> Commands.create { ctx with busAddress = "" } spec)
+      assert (Result.isError r && not (ran "podman create" calls) && not (ran "systemd-run" calls)))
+    test "enter a --dbus box: a running filter is left alone; a stopped one is started with the box's own names" (fun () ->
+      let bus = ("/run/user/1000/securebox/dev", "/run/user/1000/dbus")
+      let (_, calls) = record (dev "running" [ bus ]) [ "filter" ] (fun () -> Commands.enter ctx "dev" false [])
+      assert (steps calls = [ "inspect"; "--user"; "podman" ] && not (ran "systemd-run" calls))
+      let labelled (args: list<string>) : ProcessResult =
+        if List.contains "{{index .Config.Labels \"securebox.dbus\"}}" args then { code = 0; output = "org.freedesktop.Notifications,org.example.App\n" }
+        else dev "running" [ bus ] args
+      let (r, started) = record labelled [] (fun () -> Commands.enter ctx "dev" false [])
+      assert (r = Ok 0 && List.exists (String.endsWith "--filter --talk=org.freedesktop.Notifications --talk=org.example.App") started)
+      assert (String.contains "--env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/dbus/bus " (List.last started)))
+    test "a --dbus box whose label names what a box may not talk to is not entered" (fun () ->
+      let bus = ("/run/user/1000/securebox/dev", "/run/user/1000/dbus")
+      let forged (args: list<string>) : ProcessResult =
+        if List.contains "{{index .Config.Labels \"securebox.dbus\"}}" args then { code = 0; output = "org.freedesktop.systemd1\n" }
+        else dev "running" [ bus ] args
+      let (r, calls) = record forged [] (fun () -> Commands.enter ctx "dev" false [])
+      assert (Result.isError r && not (ran "systemd-run" calls) && not (ran "exec podman" calls)))
+    test "stop and rm stop a --dbus box's filter; rm clears its place" (fun () ->
+      let bus = ("/run/user/1000/securebox/dev", "/run/user/1000/dbus")
+      let (_, stopped) = record (dev "running" [ bus ]) [ "filter" ] (fun () -> Commands.stop ctx "dev")
+      assert (ran "systemctl --user stop securebox-dbus-dev" stopped && not (ran "remove" stopped))
+      let (_, removed) = record (dev "running" [ bus ]) [ "filter" ] (fun () -> Commands.rm ctx "dev" false)
+      assert (ran "systemctl --user stop securebox-dbus-dev" removed && ran "remove /run/user/1000/securebox/dev" removed)
+      let (_, plain) = record (dev "running" []) [] (fun () -> Commands.stop ctx "dev")
+      assert (not (ran "systemctl" plain)))
+    test "a stopped --sound box needs the sound server to start" (fun () ->
+      let sound = ("/run/user/1000/pulse", "/run/user/1000/pulse")
+      let (r, calls) = record (dev "exited" [ sound ]) [] (fun () -> Commands.enter ctx "dev" false [])
+      assert (Result.isError r && steps calls = [ "inspect" ])
+      let (there, _) = record (dev "exited" [ sound ]) [ "/run/user/1000/pulse/native" ] (fun () -> Commands.enter ctx "dev" false [])
+      assert (there = Ok 0))
     test "a share is what the path leads to" (fun () ->
       let asked given present = fst (record (box "") present (fun () -> Commands.share ctx given false))
       assert (asked share [ share ] = Ok { path = share; readOnly = false })

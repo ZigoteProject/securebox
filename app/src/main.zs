@@ -36,6 +36,8 @@ let private context () : result<Ctx, string> =
   Ok { user = user; uid = Posix.userId (); gid = Posix.groupId (); home = home; homes = homes
        dataDir = dataDir
        offLimits = named [ dataDir; Posix.realPath dataDir; (if Path.isAbsolute runtime then Path.getFullPath runtime else ""); Posix.realPath runtime ]
+       runtime = (if Path.isAbsolute runtime then Path.getFullPath runtime else "")
+       busAddress = env "DBUS_SESSION_BUS_ADDRESS"
        cwd = Environment.currentDirectory ()
        shell = if shell <> "" && List.forall plain (String.chars shell) then shell else "sh"
        tty = Posix.isTerminal 0 && Posix.isTerminal 1
@@ -56,6 +58,12 @@ let private waylandSocket () : result<string, string> =
   if Path.isAbsolute display then Box.mountable (Path.getFullPath display)
   else if Path.isAbsolute runtime then Box.mountable (Path.getFullPath (runtime + "/" + display))
   else Error "--wayland: XDG_RUNTIME_DIR is not set, so the compositor's socket cannot be found"
+
+/// The directory of the sound server's PulseAudio socket, which PipeWire provides too.
+let private soundDir () : result<string, string> =
+  let runtime = env "XDG_RUNTIME_DIR"
+  if Path.isAbsolute runtime then Box.mountable (Path.getFullPath (runtime + "/pulse"))
+  else Error "--sound: XDG_RUNTIME_DIR is not set, so the sound server's socket cannot be found"
 
 let rec private createSpec (ctx: Ctx) (spec: CreateSpec) (args: list<Cli.Create.Arg>) : result<CreateSpec, string> =
   match args with
@@ -84,6 +92,12 @@ let rec private createSpec (ctx: Ctx) (spec: CreateSpec) (args: list<Cli.Create.
   | Cli.Create.Wayland :: rest ->
     let socket = (waylandSocket ())?
     createSpec ctx { spec with wayland = Some socket } rest
+  | Cli.Create.Sound :: rest ->
+    let dir = (soundDir ())?
+    createSpec ctx { spec with sound = Some dir } rest
+  | Cli.Create.Dbus n :: rest ->
+    let name = (Box.busName n)?
+    createSpec ctx { spec with dbus = List.append spec.dbus [ name ] } rest
 
 /// The box a command names, checked.
 let private named (command: string) (names: list<string>) : result<string, string> =

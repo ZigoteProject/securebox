@@ -16,9 +16,17 @@ type BoxState =
 let boxDir (ctx: Ctx) (name: string) = $"{ctx.dataDir}/{name}"
 let boxHome (ctx: Ctx) (name: string) = $"{ctx.dataDir}/{name}/home"
 
-/// The box's own runtime directory, and the compositor's socket in it, of a `--wayland` box.
+/// The box's own runtime directory, which a box with a session grant has, and where each
+/// grant is in it: the compositor's socket (`--wayland`), the directory of the sound
+/// server's PulseAudio socket (`--sound`), and that of the D-Bus filter's (`--dbus`).
 let runtimeDir (ctx: Ctx) = $"/run/user/{ctx.uid}"
 let waylandSocket (ctx: Ctx) = $"/run/user/{ctx.uid}/wayland-0"
+let pulseDir (ctx: Ctx) = $"/run/user/{ctx.uid}/pulse"
+let busDir (ctx: Ctx) = $"/run/user/{ctx.uid}/dbus"
+
+/// On the host: where a box's D-Bus filter listens, and the unit it runs as.
+let hostBusDir (ctx: Ctx) (name: string) = $"{ctx.runtime}/securebox/{name}"
+let busUnit (name: string) = $"securebox-dbus-{name}"
 
 let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
   let share (s: Share) =
@@ -28,15 +36,28 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
     | Private -> [ "--network"; "pasta" ]
     | NoNetwork -> [ "--network"; "none" ]
     | HostNetwork -> [ "--network"; "host" ]
-  // The compositor is a process of the session: SELinux lets a confined container connect
-  // to it only with labelling off, so that is what --wayland costs.
+  // The compositor, the sound server and the D-Bus filter are processes of the session:
+  // SELinux lets a confined container connect to one only with labelling off, so that is
+  // what each of these grants costs. They share one runtime directory of the box's own.
+  let session =
+    if Option.isSome spec.wayland || Option.isSome spec.sound || spec.dbus <> [] then
+      [ "--security-opt"; "label=disable"
+        "--mount"; $"type=tmpfs,dst={runtimeDir ctx},tmpfs-mode=0700,chown=true" ]
+    else []
   let wayland =
     match spec.wayland with
-    | Some socket ->
-      [ "--security-opt"; "label=disable"
-        "--mount"; $"type=tmpfs,dst={runtimeDir ctx},tmpfs-mode=0700,chown=true"
-        "--mount"; $"type=bind,src={socket},dst={waylandSocket ctx}" ]
+    | Some socket -> [ "--mount"; $"type=bind,src={socket},dst={waylandSocket ctx}" ]
     | None -> []
+  // directories, not the sockets: a server that restarts makes a new socket in the same place
+  let sound =
+    match spec.sound with
+    | Some dir -> [ "--mount"; $"type=bind,src={dir},dst={pulseDir ctx},ro" ]
+    | None -> []
+  let dbus =
+    if spec.dbus <> [] then
+      [ "--label"; "securebox.dbus=" + String.join "," spec.dbus
+        "--mount"; $"type=bind,src={hostBusDir ctx spec.name},dst={busDir ctx},ro" ]
+    else []
   List.concat [
     [ "create"; "--name"; spec.name; "--hostname"; spec.name; "--label"; "securebox=1" ]
     [ "--init"; "--entrypoint"; "[\"sleep\",\"infinity\"]" ]
@@ -51,7 +72,10 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
     net
     List.collect (fun p -> [ "--publish"; p ]) spec.publish
     List.collect (fun d -> [ "--device"; d ]) spec.devices
+    session
     wayland
+    sound
+    dbus
     [ spec.image ] ]
 
 /// The name, the state and the label on one line, then a mount per line. The label is
@@ -82,13 +106,50 @@ let parseInspect (output: string) : BoxState =
 let ours (ctx: Ctx) (name: string) (state: BoxState) =
   state.name = name && state.labelled && List.contains (boxHome ctx name, ctx.home) state.mounts
 
-/// The shared directories: the mounts whose source is their destination.
+/// The shared directories: the mounts whose source is their destination, the session
+/// grants in the box's runtime directory aside.
 let shares (ctx: Ctx) (state: BoxState) =
-  state.mounts |> List.filter (fun (source, destination) -> source = destination && destination <> waylandSocket ctx) |> List.map snd
+  state.mounts
+  |> List.filter (fun (source, destination) -> source = destination && not (under (runtimeDir ctx) destination))
+  |> List.map snd
 
-/// The compositor's socket on the host, for a box created with `--wayland`.
-let waylandSource (ctx: Ctx) (state: BoxState) =
-  state.mounts |> List.tryFind (fun (_, destination) -> destination = waylandSocket ctx) |> Option.map fst
+let private mountedAt (destination: string) (state: BoxState) =
+  state.mounts |> List.tryFind (fun (_, d) -> d = destination) |> Option.map fst
+
+/// Whether the box was created with `--dbus`.
+let hasBus (ctx: Ctx) (state: BoxState) = Option.isSome (mountedAt (busDir ctx) state)
+
+/// What a box with session grants needs from the host to start: each as what it is and
+/// where it must be. (The D-Bus filter is started by securebox itself.)
+let sessionNeeds (ctx: Ctx) (state: BoxState) : list<string * string> =
+  List.concat [
+    Option.toList (Option.map (fun s -> ("the Wayland compositor's socket", s)) (mountedAt (waylandSocket ctx) state))
+    Option.toList (Option.map (fun d -> ("the sound server's socket", d + "/native")) (mountedAt (pulseDir ctx) state)) ]
+
+/// The environment that tells programs in the box where its session grants are.
+let sessionEnv (ctx: Ctx) (state: BoxState) : list<string> =
+  let granted destination = Option.isSome (mountedAt destination state)
+  let each =
+    List.concat [
+      (if granted (waylandSocket ctx) then [ "WAYLAND_DISPLAY=wayland-0" ] else [])
+      (if granted (pulseDir ctx) then [ $"PULSE_SERVER=unix:{pulseDir ctx}/native" ] else [])
+      (if granted (busDir ctx) then [ $"DBUS_SESSION_BUS_ADDRESS=unix:path={busDir ctx}/bus" ] else []) ]
+  if each = [] then [] else $"XDG_RUNTIME_DIR={runtimeDir ctx}" :: each
+
+/// A `--dbus` box's names, as `create` wrote them in its label.
+let busLabelArgs (name: string) =
+  [ "inspect"; "--type"; "container"; "--format"; "{{index .Config.Labels \"securebox.dbus\"}}"; name ]
+
+/// The D-Bus filter of a box, run by the user's systemd so that it outlives securebox:
+/// xdg-dbus-proxy between the session bus and a socket of the box's, letting through only
+/// calls to the names granted.
+let proxyActiveArgs (name: string) = [ "--user"; "is-active"; "--quiet"; busUnit name ]
+let proxyStopArgs (name: string) = [ "--user"; "stop"; busUnit name ]
+let proxyStartArgs (ctx: Ctx) (name: string) (names: list<string>) =
+  List.concat [
+    [ "--user"; "--quiet"; "--collect"; "--unit"; busUnit name; "--"; "xdg-dbus-proxy" ]
+    [ ctx.busAddress; hostBusDir ctx name + "/bus"; "--filter" ]
+    List.map (fun n -> "--talk=" + n) names ]
 
 /// Where a command starts in the box: the host's working directory when a share holds it,
 /// the home directory otherwise.
@@ -112,7 +173,7 @@ let listArgs =
 let private shellCommand (shell: string) =
   [ "sh"; "-c"; "exec \"$(command -v \"$0\" || command -v bash || echo sh)\" -l"; shell ]
 
-let execArgs (ctx: Ctx) (name: string) (root: bool) (wayland: bool) (dir: string) (cmd: list<string>) : list<string> =
+let execArgs (ctx: Ctx) (name: string) (root: bool) (session: list<string>) (dir: string) (cmd: list<string>) : list<string> =
   List.concat [
     [ "exec"; "--interactive" ]
     (if ctx.tty then [ "--tty" ] else [])
@@ -120,7 +181,7 @@ let execArgs (ctx: Ctx) (name: string) (root: bool) (wayland: bool) (dir: string
     (if root then [ "--user"; "0"; "--env"; "HOME=/root"; "--env"; "USER=root" ]
      else [ "--env"; $"HOME={ctx.home}"; "--env"; $"USER={ctx.user}" ])
     [ "--workdir"; dir; "--env"; $"SECUREBOX={name}" ]
-    (if wayland then [ "--env"; $"XDG_RUNTIME_DIR={runtimeDir ctx}"; "--env"; "WAYLAND_DISPLAY=wayland-0" ] else [])
+    List.collect (fun v -> [ "--env"; v ]) session
     List.collect (fun v -> [ "--env"; v ]) ctx.passEnv
     [ name ]
     (if cmd = [] then shellCommand ctx.shell else cmd) ]

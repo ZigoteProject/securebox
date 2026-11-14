@@ -13,6 +13,13 @@ effect Host =
   abstract realPath : string -> string
   /// Creates a directory, private to the user, and those above it.
   abstract ensureDir : string -> result<unit, string>
+  /// Runs a program of the host's (systemd's, for the D-Bus filter) and waits: its exit
+  /// code, 127 when it couldn't start.
+  abstract tool : string * list<string> -> int
+  /// Deletes a file or an empty directory, if it is there.
+  abstract remove : string -> unit
+  /// Waits a moment for a path to appear; whether it did.
+  abstract awaitPath : string -> bool
   /// A line for the user.
   abstract say : string -> unit
 
@@ -26,6 +33,13 @@ let rec private createAll (path: string) : result<unit, string> =
       | Error e -> Error e
       | Ok () -> if Posix.setMode path 448 then Ok () else Error $"cannot make {path} private"
 
+let rec private appears (path: string) (tries: int) =
+  if Posix.exists path then true
+  else if tries = 0 then false
+  else
+    Task.run (Task.sleep 50)
+    appears path (tries - 1)
+
 let real (app: unit -> 'a) =
   handle app () with
   | Host.capture args, k -> k (Process.run "podman" args)
@@ -36,6 +50,15 @@ let real (app: unit -> 'a) =
   | Host.pathExists path, k -> k (Posix.exists path)
   | Host.realPath path, k -> k (Posix.realPath path)
   | Host.ensureDir path, k -> k (createAll path)
+  | Host.tool (program, args), k ->
+    k (match Process.run program args with
+       | Ok r -> r.code
+       | Error _ -> 127)
+  | Host.remove path, k ->
+    if Directory.exists path then Directory.delete path |> ignore
+    else if Posix.exists path then File.delete path |> ignore
+    k ()
+  | Host.awaitPath path, k -> k (appears path 60)
   | Host.say line, k ->
     eprintln line
     k ()
