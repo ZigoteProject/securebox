@@ -21,14 +21,17 @@ refuses to run as root.
 
 ## Install
 
-The [0.1.0 release](https://github.com/ZigoteProject/securebox/releases/tag/v0.1.0) has a
-static binary for x86-64 Linux:
+Each [release](https://github.com/ZigoteProject/securebox/releases) has a static binary
+for x86-64 Linux:
 
 ```sh
-gh release download v0.1.0 --repo ZigoteProject/securebox
+v=0.1.1
+curl -fsSLO "https://github.com/ZigoteProject/securebox/releases/download/v$v/securebox-$v-x86_64-linux.tar.gz"
+curl -fsSLO "https://github.com/ZigoteProject/securebox/releases/download/v$v/SHA256SUMS"
 sha256sum --check SHA256SUMS
-tar xzf securebox-0.1.0-x86_64-linux.tar.gz
-install -m 755 securebox-0.1.0-x86_64-linux/securebox ~/.local/bin/
+tar xzf "securebox-$v-x86_64-linux.tar.gz"
+install -Dm 755 "securebox-$v-x86_64-linux/securebox" ~/.local/bin/securebox
+securebox --version
 ```
 
 It needs rootless podman 5.3 or later. For arm64, or from source, see [Building](#building).
@@ -180,7 +183,7 @@ cp build/securebox ~/.local/bin/
 
 ```sh
 zs test            # 158 unit tests: validation, the exact podman arguments, the command flows
-tests/e2e.sh       # 253 checks with real podman, on Fedora, Ubuntu and Alpine images
+tests/e2e.sh       # 254 checks with real podman, on Fedora, Ubuntu and Alpine images
 ```
 
 The end-to-end script creates boxes named `sbx-e2e-<pid>-*`, keeps their data in a

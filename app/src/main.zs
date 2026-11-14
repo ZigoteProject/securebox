@@ -103,6 +103,9 @@ let private named (command: string) (names: list<string>) : result<string, strin
 
 let private run (cmd: Cli.Command) : result<int, string> =
   match cmd with
+  | Cli.Version ->
+    println $"securebox {Cli.version}"
+    Ok 0
   | Cli.List -> Commands.list (Posix.userId ())
   | Cli.Create args ->
     let ctx = (context ())?

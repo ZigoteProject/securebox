@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 (2026-11-14)
+
+- `securebox --version`.
+- The install instructions download with `curl`: the repository is public.
+
 ## 0.1.0 (2026-11-14)
 
 The first release.

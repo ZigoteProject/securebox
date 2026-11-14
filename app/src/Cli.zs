@@ -2,6 +2,9 @@
 // has what each grant means.
 open Argz
 
+/// The release this is; app/zs.toml says the same (tests/e2e.sh checks that it does).
+let version = "0.1.1"
+
 module Create =
   [<Derive(Arg)>]
   type Arg =
@@ -69,6 +72,7 @@ type Command =
   | List
   | Stop of list<Stop.Arg>
   | Rm of list<Rm.Arg>
+  | Version
 
 let spec a =
   match a with
@@ -77,3 +81,4 @@ let spec a =
   | List -> { help = "list the boxes"; kind = Command }
   | Stop _ -> Argz.command "stop a box" Stop.spec
   | Rm _ -> Argz.command "remove a box; its home directory is kept" Rm.spec
+  | Version -> { help = "show the version" }

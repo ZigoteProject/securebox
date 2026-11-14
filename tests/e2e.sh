@@ -427,6 +427,7 @@ is "$t a directory that was never a box is not purged" "125 yes" "$? $([ -d "$SE
 t="[cli]"
 has "$t list has a column for D-Bus names" "DBUS" "$("$SB" list 2>/dev/null | head -1)"
 has "$t --help lists the commands" "create" "$("$SB" --help)"
+is "$t --version is the manifest's" "securebox $(sed -n 's/^version = "\(.*\)"/\1/p' "$here/app/zs.toml")" "$("$SB" --version)"
 has "$t a command's --help lists its options" "--share-ro" "$("$SB" create --help)"
 is "$t a command without arguments has its own help" "usage: securebox list [options]" "$("$SB" list --help | head -1)"
 "$SB" list stop x >/dev/null 2>&1

@@ -1,8 +1,8 @@
 # securebox — design
 
-Status: 2026-11-14, released as 0.1.0. Implemented: the five commands and the `--share`,
+Status: 2026-11-14, released as 0.1.1. Implemented: the five commands and the `--share`,
 `--share-ro`, `--network`, `--publish`, `--gpu`, `--wayland`, `--sound` and `--dbus` grants,
-with 158 unit tests and an end-to-end script of 253 checks against real podman. The code has
+with 158 unit tests and an end-to-end script of 254 checks against real podman. The code has
 had a correctness review and two independent security reviews; appendix D lists what they
 found and what was done.
 
@@ -636,12 +636,12 @@ zs test                                                     # every member's tes
 cd app && zs build --release --target x86_64-linux-musl     # the static binary
 ```
 
-- The release build is a static binary cross-linked through `zig cc`: 626 KB for x86-64,
-  618 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
+- The release build is a static binary cross-linked through `zig cc`: about 630 KB for x86-64,
+  620 KB for arm64 (`aarch64-linux-musl`), C shim included. A run that only parses its
   arguments takes about half a millisecond. Two builds of one commit are the same bytes.
-- A release is made by hand, there is no CI: set the version in `app/zs.toml` and
-  `CHANGELOG.md`, run `zs test`, build the static binary, run `tests/e2e.sh` with
-  `SECUREBOX` set to it, tag `vX.Y.Z`, and attach
+- A release is made by hand, there is no CI: set the version in `app/zs.toml`,
+  `Cli.version`, the README's install lines and `CHANGELOG.md`, run `zs test`, build the
+  static binary, run `tests/e2e.sh` with `SECUREBOX` set to it, tag `vX.Y.Z`, and attach
   `securebox-X.Y.Z-x86_64-linux.tar.gz` (the binary, `LICENSE`, `README.md`) and
   `SHA256SUMS` to the GitHub release. arm64 is not shipped until it has been run on one.
 - Build needs: Z# 0.7.1 (`.toolchain/`, not committed), clang 23+, zig.
@@ -658,7 +658,7 @@ cd app && zs build --release --target x86_64-linux-musl     # the static binary
   ownership check against an image's label, another data directory and an id prefix; the
   command flows under the recording `Host` handler; argz parse tables and `expect` tests
   of usage text; the posix functions.
-- **End to end (`tests/e2e.sh`, 253 checks):** the built binary against real podman, on
+- **End to end (`tests/e2e.sh`, 254 checks):** the built binary against real podman, on
   Fedora, Ubuntu and Alpine images: every row of section 3's table probed from inside the
   box, shares, exit codes, the lifecycle, the grants (the session grants included, where
   the session has a compositor, a sound server and a bus), refusals, and containers that are not securebox's. It keeps its
@@ -766,7 +766,7 @@ What Z# 0.7.1 does that the design had to follow, for whoever writes M1:
 ## Appendix C: end-to-end results
 
 `tests/e2e.sh` on podman 6.1.3 (rootless, crun, pasta, SELinux enforcing, a GNOME Wayland
-session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 253 passed,
+session with PipeWire), images `fedora:45`, `ubuntu:24.04` and `alpine:latest`: 254 passed,
 0 failed.
 
 Per image: the home starts empty; the uid, `HOME` and passwd entry; zero capabilities,
