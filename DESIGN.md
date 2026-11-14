@@ -635,7 +635,7 @@ are the one `podman inspect`; securebox's own start-up is under a millisecond.
 
 ## Appendix D: the reviews
 
-Two reviews of commit `1d03749`: a correctness review, and a security review by a reader
+Two reviews of commit `c943898`: a correctness review, and a security review by a reader
 who had not seen the design discussion. Every finding below was reproduced or confirmed in
 the code before it was fixed, and each fix has a unit or end-to-end test.
 

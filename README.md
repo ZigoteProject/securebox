@@ -167,3 +167,7 @@ appendix D, lists what they found and what was done about each finding.
 - Z# is pre-1.0; this builds with 0.7.1.
 
 [DESIGN.md](DESIGN.md) has the reasoning behind each of these.
+
+## License
+
+[MIT](LICENSE).
