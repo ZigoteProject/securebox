@@ -1,0 +1,26 @@
+// securebox in a dev container, for Zed with rootless podman ("use_podman": true in Zed's
+// settings). Zed runs its terminals, tasks and language servers in the container, so the Z#
+// extension (zsharp's editors/zed, installed on the host as a dev extension) finds `zs` on the
+// container's PATH and needs no path in the settings.
+{
+  "name": "securebox",
+  "build": { "dockerfile": "Containerfile" },
+
+  // The project and nothing else of the host, at the path it has outside, as in a securebox
+  // box: paths in compiler output, in build/ and in .zs-cache/ mean the same on both sides.
+  "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+  "workspaceFolder": "${localWorkspaceFolder}",
+
+  // You are the image's `dev` user (uid 1000) whatever your uid is outside, so there is no
+  // image layer to rebuild for it.
+  "containerUser": "dev",
+  "remoteUser": "dev",
+  "updateRemoteUserUID": false,
+  "runArgs": [
+    "--userns=keep-id:uid=1000,gid=1000",
+    // stated, as securebox states it: the host's 127.0.0.1 is not the container's
+    "--network=pasta"
+  ],
+  "securityOpt": ["no-new-privileges"],
+  "init": true
+}

@@ -249,6 +249,25 @@ cp build/securebox ~/.local/bin/
 
 `--target aarch64-linux-musl` builds for arm64 (built, never run on one).
 
+### In a dev container
+
+`.devcontainer/` is that toolchain as an image: Fedora 45 with clang, zig and the Z# release,
+its checksum pinned. [Zed](https://zed.dev/docs/dev-containers) opens the project in it with
+rootless podman (`"use_podman": true` in Zed's settings; **Open in Container** when it asks)
+and runs its terminals and language servers there. So the
+[Z# extension](https://github.com/ZigoteProject/zsharp/tree/main/editors/zed), installed on
+the host as a dev extension, finds `zs` on the container's `PATH`: the host needs no compiler.
+
+The container gets the project, at the path it has outside, and nothing else of the host; you
+are its `dev` user, and `no-new-privileges` is set. It is not a securebox box: Zed turns
+SELinux labelling off for a podman dev container, and the configuration takes
+`--userns=keep-id`, so docker does not run it. After a change to `.devcontainer/`, remove the
+container yourself (`podman rm -f`); Zed does not rebuild it.
+
+`zs build` and `zs test` work inside. `tests/e2e.sh` needs podman and stays on the host.
+Checked: the image's steps one by one (the packages, the pinned archive, the 220 tests with the
+`zs` it installs). Not checked: the image built by podman, and the project opened in Zed.
+
 ## Testing
 
 ```sh
@@ -271,6 +290,7 @@ app/               the securebox binary: Cli, Box (validation), Podman (argument
 packages/argz/     an Argu-style argument parser for Z#: a union is the command line
 packages/posix/    exec, realpath, user ids, isatty, chmod: all of the project's C (60 lines)
 tests/e2e.sh       the end-to-end tests
+.devcontainer/     the development image and the dev container's configuration
 DESIGN.md          the design: threat model, the podman command lines, what was verified
 ```
 
