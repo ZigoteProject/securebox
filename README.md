@@ -11,6 +11,7 @@ securebox enter web -- npm test                        # one command; its exit c
 securebox enter web -e NODE_ENV=test -e API_KEY -- npm test   # with variables; API_KEY's value is the one here
 securebox enter web --root -- apt install -y nodejs    # root, granted from the host side
 securebox create gui --wayland --sound                 # GUI programs with sound (see what it costs, below)
+securebox create ide --wayland --gpu --kvm --pids-limit 16384 --shm-size 2g   # an IDE and an emulator
 securebox recreate web --share ~/Projects/web --network none   # other grants; what was installed stays
 securebox export web --bin node --app org.example.Editor       # on the host: a command, a menu entry
 securebox list
@@ -88,7 +89,9 @@ run it on the host. Use `--share-ro` when the box only needs to read.
 
 ## Grants
 
-All off by default, all given to `create`, all visible in `securebox list`.
+All off by default, all given to `create`. `securebox list` shows a box's shares, network,
+ports and D-Bus names; its devices and limits are in the record of what made it
+(`~/.local/share/securebox/NAME/created`).
 
 | Flag | Grants |
 |---|---|
@@ -101,6 +104,9 @@ All off by default, all given to `create`, all visible in `securebox list`.
 | `--wayland` | the Wayland compositor's socket, for GUI programs (*) |
 | `--sound` | playing and recording sound, through a front-end of the box's own (*) |
 | `--dbus NAME` | calls to the interface of that name on your session bus, through a filter (repeatable) (*) |
+| `--kvm` | `/dev/kvm`: hardware virtualisation, for virtual machines and the Android emulator |
+| `--pids-limit N` | N processes and threads at once; podman's default is 2048 |
+| `--shm-size SIZE` | a `/dev/shm` of that size (`512m`, `4g`); podman's default is 64 MB |
 
 (*) These three reach into your desktop session, and on an SELinux host a box with any of
 them runs **without SELinux confinement**. They cannot be combined with `--network host`.
@@ -112,6 +118,12 @@ dot-directories of your home (`~/.ssh`, `~/.config`, …). A path is judged by w
 to, so a symbolic link to any of those is refused too. On an SELinux host, sharing a
 directory relabels it for containers, permanently; that is harmless for a project
 directory.
+
+`--kvm` gives the box nothing of your files or your session, and it does give it more of
+the kernel: the KVM interface, which a box otherwise cannot reach. It keeps the box's
+SELinux confinement. The two limits are for boxes that run an IDE, a browser or a large
+build: 2048 counts threads, and Chromium wants more shared memory than 64 MB. A limit is a
+number, never "none", and the size is a ceiling: memory is used as `/dev/shm` fills.
 
 One box cannot have a share inside another of its read-write shares (the box could swap
 the inner one for a link), and a stopped box is started only if each of its shares is
@@ -271,7 +283,7 @@ Checked: the image's steps one by one (the packages, the pinned archive, the 220
 ## Testing
 
 ```sh
-zs test            # 220 unit tests: validation, the exact podman arguments, the command flows
+zs test            # 224 unit tests: validation, the exact podman arguments, the command flows
 tests/e2e.sh       # 312 checks with real podman, on Fedora, Ubuntu and Alpine images
 ```
 
@@ -300,7 +312,8 @@ DESIGN.md          the design: threat model, the podman command lines, what was 
 The code has had a correctness review and two independent security reviews, the second
 of the desktop grants; DESIGN.md, appendix D, lists what they found and what was done
 about each finding. `recreate` and `export` came after those reviews and have not had one
-of their own.
+of their own. `--kvm`, `--pids-limit` and `--shm-size` came later still: they have unit
+tests, and their end-to-end checks are written and have not been run.
 
 ## Limits
 

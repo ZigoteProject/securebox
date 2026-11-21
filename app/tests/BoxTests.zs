@@ -63,9 +63,10 @@ let tests =
       assert (Box.createLine { name = "dev"; image = "fedora:45" } = "securebox create dev fedora:45")
       let spec = { name = "web"; image = "docker.io/library/ubuntu:24.04"; network = NoNetwork; publish = [ "127.0.0.1:8080:80" ]
                    shares = [ { path = "/srv/my project"; readOnly = false }; { path = "/srv/it's"; readOnly = true } ]
-                   devices = [ "/dev/dri/renderD128" ]; wayland = Some "/run/user/1000/wayland-0"; sound = true; dbus = [ "org.example.App" ] }
+                   devices = [ "/dev/dri/renderD128" ]; wayland = Some "/run/user/1000/wayland-0"; sound = true; dbus = [ "org.example.App" ]
+                   kvm = true; pidsLimit = Some 4096; shmSize = Some "2g" }
       assert (Box.createLine spec
-              = "securebox create web docker.io/library/ubuntu:24.04 --share '/srv/my project' --share-ro '/srv/it'\\''s' --network none --publish 127.0.0.1:8080:80 --gpu --wayland --sound --dbus org.example.App"))
+              = "securebox create web docker.io/library/ubuntu:24.04 --share '/srv/my project' --share-ro '/srv/it'\\''s' --network none --publish 127.0.0.1:8080:80 --gpu --kvm --wayland --sound --dbus org.example.App --pids-limit 4096 --shm-size 2g"))
     test "what was typed for a share is made absolute; nothing typed is a mistake" (fun () ->
       assert (Box.absolutePath ctx "../assets/" = Ok "/home/ada/Projects/web/assets")
       assert (Box.absolutePath ctx "/srv//data/./x/.." = Ok "/srv/data")
@@ -94,6 +95,16 @@ let tests =
       assert (Box.runtimePath "/run/user/1000" = Ok "/run/user/1000")
       for p in [ "run/user"; "/run/us er"; "/run/$HOME"; "/run/a\"b"; "/run/a,b"; "/run/a=b" ] do
         assert (Result.isError (Box.runtimePath p)))
+    test "a limit on processes is a number the kernel could reach, and never 'no limit'" (fun () ->
+      for n in [ 1; 2048; 32768; 4194304 ] do
+        assert (Box.pidsLimit n = Ok n)
+      for n in [ 0; -1; 4194305 ] do
+        assert (Result.isError (Box.pidsLimit n)))
+    test "a size for /dev/shm is a number and its unit, and nothing podman would read more into" (fun () ->
+      for s in [ "64m"; "512m"; "4g"; "65536k"; "010m" ] do
+        assert (Box.shmSize s = Ok s)
+      for s in [ ""; "4"; "m"; "0m"; "000g"; "1G"; "1gb"; "1b"; "1.5g"; "-1m"; "1 g"; "64m,size=1"; "64m --privileged"; "1234567890m" ] do
+        assert (Result.isError (Box.shmSize s)))
     test "network" (fun () ->
       assert (Box.network "private" = Ok Private && Box.network "none" = Ok NoNetwork && Box.network "host" = Ok HostNetwork)
       assert (Result.isError (Box.network "bridge")))

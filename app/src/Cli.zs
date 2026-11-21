@@ -15,9 +15,12 @@ module Create =
     | Network of string
     | Publish of string
     | Gpu
+    | Kvm
     | Wayland
     | Sound
     | Dbus of string
+    | PidsLimit of int
+    | ShmSize of string
 
   let spec a =
     match a with
@@ -28,9 +31,12 @@ module Create =
     | Network _ -> { help = "private (the default: outbound only), none or host" }
     | Publish _ -> { help = "publish a port, [IP:]HOST:BOX[/udp]; on 127.0.0.1 unless IP is given (repeatable)"; short = Some 'p' }
     | Gpu -> { help = "give the box the GPU's render devices (/dev/dri/renderD*)" }
+    | Kvm -> { help = "give the box /dev/kvm, for virtual machines and the Android emulator" }
     | Wayland -> { help = "let GUI programs reach the Wayland compositor; SELinux confinement is off for such a box" }
     | Sound -> { help = "let programs play and record sound (PulseAudio socket); SELinux confinement off, as for --wayland" }
     | Dbus _ -> { help = "let the box talk to this session-bus name, through a filter (repeatable); SELinux confinement off" }
+    | PidsLimit _ -> { help = "how many processes and threads the box may have at once (podman's default: 2048)" }
+    | ShmSize _ -> { help = "the size of the box's /dev/shm, as 512m or 4g (podman's default: 64m)" }
 
 module Recreate =
   [<Derive(Arg)>]
@@ -41,9 +47,12 @@ module Recreate =
     | Network of string
     | Publish of string
     | Gpu
+    | Kvm
     | Wayland
     | Sound
     | Dbus of string
+    | PidsLimit of int
+    | ShmSize of string
 
   /// The grants are `create`'s, and so is what is said about them.
   let asCreate a =
@@ -54,9 +63,12 @@ module Recreate =
     | Network n -> Create.Network n
     | Publish p -> Create.Publish p
     | Gpu -> Create.Gpu
+    | Kvm -> Create.Kvm
     | Wayland -> Create.Wayland
     | Sound -> Create.Sound
     | Dbus n -> Create.Dbus n
+    | PidsLimit n -> Create.PidsLimit n
+    | ShmSize s -> Create.ShmSize s
 
   let spec a =
     match a with

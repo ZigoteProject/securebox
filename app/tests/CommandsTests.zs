@@ -260,6 +260,13 @@ let tests =
       assert (steps calls = [ "inspect"; "stop"; "commit"; "rm"; "inspect"; "container"; $"{dir}/home"; "create"; "start"; "exec"; $"{dir}/created" ])
       assert (List.item 2 calls = $"podman commit --quiet dev {snapshot}")
       assert (List.exists (String.endsWith $",ro --workdir /home/ada --network none {snapshot}") calls))
+    test "recreate: a device and limits are grants like the others, given again or gone" (fun () ->
+      let spec = { name = "dev"; image = ""; kvm = true; pidsLimit = Some 32768; shmSize = Some "4g" }
+      let (r, calls) = record (recreating "") [] (fun () -> Commands.recreate ctx spec)
+      assert (r = Ok 0)
+      assert (List.exists (String.endsWith $" --device /dev/kvm --pids-limit 32768 --shm-size 4g {snapshot}") calls)
+      let (again, plain) = record (recreating "") [] (fun () -> Commands.recreate ctx { name = "dev"; image = "" })
+      assert (again = Ok 0 && not (List.exists (fun c -> String.contains "/dev/kvm" c || String.contains "--pids-limit" c || String.contains "--shm-size" c) plain)))
     test "recreate: grants that cannot go together, and a box that isn't there, touch nothing" (fun () ->
       let (r, calls) = record (recreating "") pipewire (fun () -> Commands.recreate ctx { name = "dev"; image = ""; network = HostNetwork; sound = true })
       assert (Result.isError r && calls = [])

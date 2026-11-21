@@ -225,6 +225,39 @@ if ls /dev/dri/renderD* >/dev/null 2>&1; then
   "$SB" rm "$name" --purge >/dev/null 2>&1
 fi
 
+# The limits, and a box with neither as their control. /dev/shm is measured in kilobytes and
+# held to a range: podman's default is written "65536k" and comes out as 64000k, so whether
+# its "m" is 1000 or 1024 kilobytes is left open here.
+shm_kb='sed -n "s|.* /dev/shm .*size=\([0-9]*\)k.*|\1|p" /proc/mounts'
+about_128m() { [ "${1:-0}" -ge 120000 ] && [ "${1:-0}" -le 135000 ] && echo yes || echo "no: ${1:-nothing}k"; }
+name="$prefix-limits"
+boxes+=("$name")
+"$SB" create "$name" "$image" --pids-limit 4321 --shm-size 128m >/dev/null 2>&1
+is "$t --pids-limit: the box's limit on processes and threads" "4321" "$(box 'cat /sys/fs/cgroup/pids.max')"
+is "$t --shm-size: /dev/shm is that size" "yes" "$(about_128m "$(box "$shm_kb")")"
+has "$t the limits are in the record of what made the box" "--pids-limit 4321 --shm-size 128m" "$(cat "$SECUREBOX_DATA/$name/created" 2>&1)"
+"$SB" recreate "$name" --shm-size 128m >/dev/null 2>&1
+hasnt "$t recreate: a limit not given again is gone" "4321" "$(box 'cat /sys/fs/cgroup/pids.max')"
+is "$t recreate: a limit given again stays" "yes" "$(about_128m "$(box "$shm_kb")")"
+"$SB" rm "$name" --purge >/dev/null 2>&1
+
+name="$prefix-nokvm"
+boxes+=("$name")
+"$SB" create "$name" "$image" >/dev/null 2>&1
+is "$t without --kvm there is no /dev/kvm" "absent" "$(box 'ls /dev/kvm 2>/dev/null || echo absent')"
+hasnt "$t without --shm-size, /dev/shm is podman's size" "yes" "$(about_128m "$(box "$shm_kb")")"
+"$SB" rm "$name" --purge >/dev/null 2>&1
+if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+  name="$prefix-kvm"
+  boxes+=("$name")
+  "$SB" create "$name" "$image" --kvm >/dev/null 2>&1
+  # opened for reading and writing by a confined box: SELinux policy has to allow it
+  is "$t --kvm: /dev/kvm can be opened" "ok" "$(box ': <>/dev/kvm && echo ok')"
+  hasnt "$t --kvm: SELinux confinement stays on" "spc_t" "$(box 'cat /proc/self/attr/current 2>/dev/null')"
+  is "$t --kvm: no other device comes with it" "absent" "$(box 'ls -d /dev/dri 2>/dev/null || echo absent')"
+  "$SB" rm "$name" --purge >/dev/null 2>&1
+fi
+
 socket="${XDG_RUNTIME_DIR:-}/${WAYLAND_DISPLAY:-wayland-0}"
 if [ -S "$socket" ]; then
   name="$prefix-wayland"
@@ -359,6 +392,10 @@ refused "a wildcard of names on the session bus" --dbus 'org.freedesktop.*'
 refused "an unknown network" --network bridge
 refused "a port that isn't one" --publish 80
 refused "an option podman would take" --privileged
+refused "no limit on processes" --pids-limit 0
+refused "a limit on processes that isn't a number" --pids-limit max
+refused "a size for /dev/shm without its unit" --shm-size 64
+refused "a size for /dev/shm with more to it" --shm-size '64m,exec'
 is "$t none of those made a container" "no" "$(podman container exists "$name" && echo yes || echo no)"
 "$SB" create "Not_A_Name" "$image" >/dev/null 2>&1
 is "$t a name that isn't one" 125 $?

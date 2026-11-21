@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `--kvm`: the box gets `/dev/kvm`, for virtual machines and the Android emulator. Its
+  SELinux confinement is kept.
+- `--pids-limit N` and `--shm-size SIZE`: how many processes and threads the box may have,
+  and how large its `/dev/shm` is, where podman's defaults (2048, 64 MB) are too small for
+  an IDE, a browser or a large build.
+- All three are grants like the others: given to `create`, restated to `recreate`, kept in
+  the `created` record. Unit-tested; the end-to-end checks have not been run yet.
+
 ## 0.2.0 (2026-11-14)
 
 - `securebox recreate NAME [grants]`: the box again, with the grants given now and what

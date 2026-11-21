@@ -148,9 +148,23 @@ let tests =
         --call=org.example.App=org.example.App.*
         --broadcast=org.example.App=org.example.App.*
         """)
+    test "create --kvm, --pids-limit, --shm-size: the one device and the two limits, and nothing else" (fun () ->
+      let plain = createArgs ctx { name = "dev"; image = "fedora:45" }
+      let more = createArgs ctx { name = "dev"; image = "fedora:45"; kvm = true; pidsLimit = Some 32768; shmSize = Some "4g" }
+      expect (lines (List.filter (fun a -> not (List.contains a plain)) more)) """
+        --device
+        /dev/kvm
+        --pids-limit
+        32768
+        --shm-size
+        4g
+        """
+      // without them, podman is told neither limit: its own defaults hold
+      assert (not (List.exists (fun a -> a = "--pids-limit" || a = "--shm-size" || a = "--device") plain)))
     test "labelling is never off without a session grant" (fun () ->
       let every = createArgs ctx { name = "web"; image = "x"; shares = [ { path = "/srv/data"; readOnly = false } ]
-                                   network = HostNetwork; publish = [ "127.0.0.1:1:1" ]; devices = [ "/dev/dri/renderD128" ] }
+                                   network = HostNetwork; publish = [ "127.0.0.1:1:1" ]; devices = [ "/dev/dri/renderD128" ]
+                                   kvm = true; pidsLimit = Some 4096; shmSize = Some "1g" }
       assert (not (List.exists (String.startsWith "label=") every)))
     test "enter: a shell" (fun () -> expect (lines (execArgs ctx "dev" false [] "/home/ada" [])) """
                                        exec
