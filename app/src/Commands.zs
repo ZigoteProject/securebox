@@ -238,8 +238,8 @@ let private provided (ctx: Ctx) (spec: CreateSpec) : result<unit, string> =
   let _ = (if spec.dbus = [] then Ok () else busUsable ctx)?
   let _ = (if spec.sound then Result.map (fun _ -> ()) (soundStock ctx) else Ok ())?
   match spec.wayland with
-  | Some socket when not (Host.isSocket socket) -> Error $"--wayland: there is no compositor socket at {socket}"
-  | _ -> Ok ()
+  | Some socket -> if Host.isSocket socket then Ok () else Error $"--wayland: there is no compositor socket at {socket}"
+  | None -> Ok ()
 
 /// Starts a box that was just created, and looks at it. `recreate` (`again`) removes one
 /// that does not come up: the box it replaced is gone by then, and what it tells the user

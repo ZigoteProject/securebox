@@ -18,7 +18,7 @@ let tests =
       assert (Posix.isRegularFile "/proc/self/status" && not (Posix.isRegularFile "/proc/self"))
       assert (not (Posix.entryExists "/no/such/path") && not (Posix.isRegularFile "/no/such/path")))
     test "createFile refuses a path that has something at it, a link included" (fun () ->
-      expect (Posix.createFile "/proc/self/exe" "x" 420) (Error "cannot create /proc/self/exe: File exists"))
+      assert (Posix.createFile "/proc/self/exe" "x" 420 = Error "cannot create /proc/self/exe: File exists"))
     test "capture: the exit code and the output, without the errors; too much and too long are ended" (fun () ->
       assert (Posix.capture "sh" [ "-c"; "echo out; echo err >&2; exit 3" ] 5 = (3, "out\n"))
       assert (Posix.capture "no-such-program-zz" [] 5 = (127, ""))
