@@ -83,6 +83,11 @@ let createArgs (ctx: Ctx) (spec: CreateSpec) : list<string> =
     net
     List.collect (fun p -> [ "--publish"; p ]) spec.publish
     List.collect (fun d -> [ "--device"; d ]) spec.devices
+    // SELinux lets a confined container use this one device (container-selinux:
+    // dev_rw_kvm(container_domain)), so it costs the box nothing of its confinement
+    (if spec.kvm then [ "--device"; "/dev/kvm" ] else [])
+    List.collect (fun (n: int) -> [ "--pids-limit"; $"{n}" ]) (Option.toList spec.pidsLimit)
+    List.collect (fun s -> [ "--shm-size"; s ]) (Option.toList spec.shmSize)
     session
     wayland
     sound

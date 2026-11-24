@@ -22,7 +22,13 @@ type CreateSpec =
     /// Sound, through a front-end of the box's own to the sound server (`--sound`).
     sound: bool = false
     /// The names on the session bus the box may talk to (`--dbus`).
-    dbus: list<string> = [] }
+    dbus: list<string> = []
+    /// The host's /dev/kvm (`--kvm`).
+    kvm: bool = false
+    /// How many processes and threads it may have (`--pids-limit`); podman's default when None.
+    pidsLimit: option<int> = None
+    /// The size of its /dev/shm (`--shm-size`); podman's default when None.
+    shmSize: option<string> = None }
 
 /// What securebox reads from its environment, once.
 type Ctx =
@@ -170,6 +176,21 @@ let busName (s: string) : result<string, string> =
     Error $"refusing to let a box talk to {s}: it runs commands on the host for whoever asks"
   else Ok s
 
+/// How many processes and threads a box may have at once (`--pids-limit`). A number: podman
+/// writes "no limit" as 0 or -1, and a box always has one. The largest is the kernel's own.
+let pidsLimit (n: int) : result<int, string> =
+  if n >= 1 && n <= 4194304 then Ok n
+  else Error $"'{n}' is not a limit on processes and threads: give a number from 1 to 4194304"
+
+/// The size of a box's /dev/shm (`--shm-size`): a number and its unit, k, m or g. The unit
+/// is required: podman reads a bare number as bytes, which nobody means.
+let shmSize (s: string) : result<string, string> =
+  let digit (c: char) = int c >= 48 && int c <= 57
+  match List.rev (String.chars s) with
+  | last :: digits when List.contains last [ 'k'; 'm'; 'g' ] && digits <> [] && List.length digits <= 9
+                        && List.forall digit digits && List.exists (fun c -> c <> '0') digits -> Ok s
+  | _ -> Error $"'{s}' is not a size for /dev/shm: write a number and its unit, as 512m or 4g"
+
 /// The shares of one box, together: none twice, and none inside a read-write one, where
 /// the box could put a link in its place for podman to follow at the next start.
 let together (shares: list<Share>) : result<list<Share>, string> =
@@ -215,9 +236,12 @@ let createLine (spec: CreateSpec) : string =
     net
     List.collect (fun p -> [ "--publish"; p ]) spec.publish
     (if spec.devices <> [] then [ "--gpu" ] else [])
+    (if spec.kvm then [ "--kvm" ] else [])
     (if Option.isSome spec.wayland then [ "--wayland" ] else [])
     (if spec.sound then [ "--sound" ] else [])
-    List.collect (fun n -> [ "--dbus"; n ]) spec.dbus ]))
+    List.collect (fun n -> [ "--dbus"; n ]) spec.dbus
+    List.collect (fun (n: int) -> [ "--pids-limit"; $"{n}" ]) (Option.toList spec.pidsLimit)
+    List.collect (fun s -> [ "--shm-size"; s ]) (Option.toList spec.shmSize) ]))
 
 let network (s: string) : result<Network, string> =
   match s with

@@ -1,0 +1,33 @@
+# securebox's development environment: what `zs build` and `zs test` need, and the `zs` that
+# an editor's Z# extension starts as its language server (`zs lsp`). The end-to-end tests are
+# not for this container: they need podman, and run on the host (tests/e2e.sh).
+FROM registry.fedoraproject.org/fedora:45
+
+# clang 23 (with libclang, for packages/posix's `import c`) and lld build for this machine,
+# zig for the static release (--target x86_64-linux-musl), gdb for `zs build -g`
+RUN dnf install -y --setopt=install_weak_deps=False \
+        clang lld compiler-rt zig git gdb \
+        tar gzip which findutils diffutils procps-ng less shadow-utils \
+    && dnf clean all
+
+# The Z# toolchain, from its release, in a directory of its own (zs finds its library and
+# runtime beside itself, through the link too).
+ARG ZS_VERSION=0.7.1
+# the archives' sha256, from the release's asset digests (a new version needs both again)
+ARG ZS_SHA256_X86_64=15c03d3ac54d5bf1a71f6b7093d10ca3e97f908db6020dd72ce2ec2ef604a1a6
+ARG ZS_SHA256_AARCH64=89fe446f224a9cbcf4f6c8070ea18e012c1ab9fc998c9f23fd181ded3432a1cf
+RUN arch=$(uname -m) \
+    && name=zs-$ZS_VERSION-linux-$arch \
+    && curl -fsSL -o /tmp/zs.tar.gz https://github.com/ZigoteProject/zsharp/releases/download/v$ZS_VERSION/$name.tar.gz \
+    && sum=$([ "$arch" = x86_64 ] && echo $ZS_SHA256_X86_64 || echo $ZS_SHA256_AARCH64) \
+    && echo "$sum  /tmp/zs.tar.gz" | sha256sum -c --quiet - \
+    && mkdir /opt/zs \
+    && tar -xzf /tmp/zs.tar.gz -C /opt/zs --strip-components=1 --no-same-owner \
+    && rm /tmp/zs.tar.gz \
+    && ln -s /opt/zs/zs /usr/local/bin/zs
+
+# Nothing runs as root: devcontainer.json maps whoever opens the project onto this user
+# (--userns=keep-id:uid=1000,gid=1000), so files written in the project stay theirs.
+RUN useradd --uid 1000 --create-home --shell /bin/bash dev
+USER dev
+RUN zs --version

@@ -94,6 +94,15 @@ let rec private createSpec (ctx: Ctx) (spec: CreateSpec) (args: list<Cli.Create.
   | Cli.Create.Gpu :: rest ->
     let devices = (renderDevices ())?
     createSpec ctx { spec with devices = devices } rest
+  | Cli.Create.Kvm :: rest ->
+    let _ = (if Posix.exists "/dev/kvm" then Ok () else Error "--kvm: there is no /dev/kvm here (no hardware virtualisation, or the kvm module is not loaded)")?
+    createSpec ctx { spec with kvm = true } rest
+  | Cli.Create.PidsLimit n :: rest ->
+    let limit = (Box.pidsLimit n)?
+    createSpec ctx { spec with pidsLimit = Some limit } rest
+  | Cli.Create.ShmSize s :: rest ->
+    let size = (Box.shmSize s)?
+    createSpec ctx { spec with shmSize = Some size } rest
   | Cli.Create.Wayland :: rest ->
     let named = (waylandSocket ())?
     let socket = (Commands.wayland ctx named)?

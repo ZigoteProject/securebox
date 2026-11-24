@@ -7,6 +7,11 @@ podman. The code has had a correctness review and two independent security revie
 appendix D lists what they found and what was done. `recreate` and `export` were added
 after them and have not been reviewed independently.
 
+Added 2026-11-21, not released: `--kvm`, `--pids-limit` and `--shm-size` (section 3). They
+were written where there is no podman: 224 unit tests pass, and their end-to-end checks
+are in the script and **have not been run**. What section 3 says of them comes from
+podman's and container-selinux's sources, not from a probe on this machine.
+
 securebox gives you a persistent, interactive Linux box from any container image, the way
 distrobox does, but the box cannot see your home directory or your session unless you share
 a path with it. One static binary written in Z# 0.7.1; podman is the only runtime dependency.
@@ -20,6 +25,7 @@ securebox enter web --root -- apt install -y nodejs
 securebox create api --publish 8080:8080 --gpu
 securebox create gui --wayland --sound    # GUI programs with sound; costs that box its SELinux confinement
 securebox create app --dbus org.freedesktop.Notifications   # one name on the session bus, filtered
+securebox create ide --wayland --gpu --kvm --pids-limit 16384 --shm-size 2g   # an IDE and an emulator
 securebox recreate web --share ~/Projects/web --network none   # other grants; what was installed stays
 securebox export web --bin node --app org.example.Editor       # a script and a menu entry on the host
 securebox list
@@ -84,7 +90,8 @@ Out of scope:
 
 - Kernel and container-runtime escapes. The box shares the host kernel; this is not a VM.
 - Exfiltration of what you did share. The network is on by default; use `--network none`.
-- Resource exhaustion, beyond podman's default pids limit (2048).
+- Resource exhaustion, beyond podman's default pids limit (2048), which `--pids-limit`
+  moves in either direction and never removes.
 - The user. Validation in section 5 guards against mistakes, not against the person at the
   keyboard, who can run podman directly.
 
@@ -137,6 +144,9 @@ mounts, networks and ports, and the names a `--dbus` box was granted).
 | `--wayland` | the Wayland compositor's socket, for GUI programs; **turns SELinux confinement off for that box** |
 | `--sound` | playing and recording, through a PulseAudio front-end of the box's own; **same cost** |
 | `--dbus NAME` (repeatable) | calls to the interface of that name on the session bus, through a filter; **same cost** |
+| `--kvm` | `/dev/kvm`, for virtual machines and the Android emulator; SELinux confinement kept |
+| `--pids-limit N` | N processes and threads at once, in place of podman's default |
+| `--shm-size SIZE` | a `/dev/shm` of that size, in place of podman's default |
 
 **What the session grants cost.** `--wayland`, `--sound` and `--dbus` each mean a socket
 that a process of the user's session listens on, and all three cost the same thing; the
@@ -251,6 +261,48 @@ notification server's answer, and is refused systemd.
 
 The GPU needs no such trade because policy allows it (`container_use_dri_devices` is on by
 default).
+
+### A device and two limits: `--kvm`, `--pids-limit`, `--shm-size`
+
+These came from one use: a box that holds an IDE, a browser and an emulator. Before them
+such a box was made with a `containers.conf` handed to podman beside securebox, which
+`recreate` then knew nothing about, and which the `created` record did not mention. A
+grant that securebox does not know is one it cannot restate, list or refuse.
+
+**`--kvm`** is `--device /dev/kvm`. What the box gains is not a file or a socket of the
+user's but more of the kernel: the KVM interface, with which it runs virtual machines of
+its own. The threat model leaves kernel escapes out, and this grant widens what an escape
+could start from, which is why it is a flag and not a default. Three things about it:
+
+- **It keeps SELinux confinement.** container-selinux allows the device to every container
+  domain without a boolean (`dev_rw_kvm(container_domain)`, read in `container.te` 2.251.0),
+  where the GPU's needs `container_use_dri_devices` and any other device
+  `container_use_devices`. So no `label=disable`, and a unit test holds that. A report
+  from 2022 has the device refused without `--privileged` on Fedora 36 (Red Hat bug
+  2074402, since fixed); the end-to-end script opens it from a confined box to find out
+  what this host does.
+- **Rootless podman bind-mounts the node**, so the box can use it when the user can
+  (distributions usually make it mode 0666). `create` refuses when the host has no `/dev/kvm`, and does not
+  check that it can be opened.
+- **Nothing else comes with it**: no `/dev/dri`, no network device (`/dev/net/tun`,
+  `/dev/vhost-net`). A machine in the box reaches the network through the box's.
+
+**`--pids-limit N`** replaces podman's default of 2048, which counts threads: an IDE, a
+language server, a build with a worker per core and a browser pass it together, and what
+follows is "resource temporarily unavailable" from whatever forks next. N is a number from
+1 to 4194304 (the kernel's own ceiling). podman's 0 and -1 mean no limit, and securebox
+takes neither: a box always has one.
+
+**`--shm-size SIZE`** replaces podman's 64 MB of `/dev/shm`, on which Chromium and Electron
+crash. SIZE is a number with its unit (`k`, `m`, `g`); a bare number, which podman reads
+as bytes, is refused. It is a ceiling on a tmpfs: memory is used as it fills, and a
+rootless box has no memory limit of its own for it to slip past.
+
+Without the flags securebox says nothing about either limit, and podman's configuration
+decides. That is unlike the network and the user, which are stated on every `create`: a
+`containers.conf` with a larger `pids_limit` applies to boxes as to every container.
+Neither limit nor the device shows in `securebox list`, which prints what `podman ps`
+reports; all three are in the `created` record.
 
 ### Changing grants: `recreate`
 
@@ -388,6 +440,8 @@ podman create
   --network pasta | none | host
   [--publish IP:HOST:BOX]                                   # one per port
   [--device /dev/dri/renderDnnn]                            # one per render node, with --gpu
+  [--device /dev/kvm]                                       # --kvm
+  [--pids-limit N] [--shm-size SIZE]
   [--security-opt label=disable                             # with any session grant
    --mount type=tmpfs,dst=/run/user/UID,tmpfs-mode=0700,chown=true]
   [--mount type=bind,src=SOCKET,dst=/run/user/UID/wayland-0,ro]           # --wayland
@@ -589,6 +643,10 @@ host paths.
 - **Bus name (`--dbus`):** a well-known name written out: at least two elements of
   letters, digits, `_` and `-`, none starting with a digit; no wildcard. Refused:
   `org.freedesktop.systemd1`, `org.freedesktop.Flatpak`, `org.freedesktop.DBus`.
+- **Limit on processes (`--pids-limit`):** an integer from 1 to 4194304. Not 0 or -1, which
+  are podman's words for "no limit".
+- **Size of `/dev/shm` (`--shm-size`):** up to nine digits, not all zero, and one of `k`,
+  `m`, `g`. Nothing else: the value is one argument of podman's, and stays a size.
 - **Network:** one of three words. **Publish:** `[IP:]PORT:PORT[/tcp|/udp]`, IPv4 only.
 - **Variable (`enter -e`):** `NAME=VALUE` or `NAME`, the name `[A-Za-z_][A-Za-z0-9_]*`. A
   bare name must be set on the host, and podman reads its value from the environment, so
@@ -851,7 +909,7 @@ cd app && zs build --release --target x86_64-linux-musl     # the static binary
 
 ## 9. Testing
 
-- **Unit (`zs test`, 220 tests):** validation tables and a property test (no accepted name
+- **Unit (`zs test`, 224 tests):** validation tables and a property test (no accepted name
   starts with `-` or contains `/`); `expect` tests of `createArgs` and `execArgs`, which
   pin the security flags, and a test that labelling is never off without a session grant; the
   ownership check against an image's label, another data directory and an id prefix; the
@@ -881,6 +939,7 @@ that cannot work. The first version of the script had no such control and could 
 | M2 ✅ | `--publish`, `--gpu`, `--wayland`, `--sound`, `--dbus`; the passwd fix-up for images with a clashing uid | done; the session grants at the cost section 3 states, `--ssh-agent` not built |
 | Review ✅ | a correctness review and an independent security review | done 2026-11-14; appendix D |
 | M3 ✅ | `--version`; `recreate`; `export`; `enter -e`; the `created` record | done 2026-11-14, after the reviews: not reviewed independently |
+| M4 | `--kvm`, `--pids-limit`, `--shm-size` | written and unit-tested 2026-11-21; done when `tests/e2e.sh` has passed with them on a host with `/dev/kvm` |
 
 ## 11. Open questions and known limits
 
@@ -913,6 +972,14 @@ that cannot work. The first version of the script had no such control and could 
     host's paths would not exist in the box anyway).
 13. **A launcher has securebox's path in it.** Move the binary, and exports must be made
     again.
+14. **`--kvm`, `--pids-limit` and `--shm-size` have not been run against podman.** Open
+    until the end-to-end script says otherwise: that a confined box can open `/dev/kvm`
+    under this host's SELinux policy, and what size podman makes of `128m` (its default,
+    written `65536k`, comes out as 64000k; the script accepts either reading).
+15. **`list` shows no devices and no limits**, `--gpu`'s included. They are in the
+    `created` record, which is what was asked for and not what podman reports.
+16. **No USB devices.** An Android phone on a cable is not reachable from a box; `adb`
+    over the network is.
 
 ## Appendix A: what was verified, and how
 
@@ -938,7 +1005,8 @@ Throwaway containers on podman 6.1.3 (rootless, crun, pasta, SELinux enforcing),
 | ubuntu: `$HOME` without and with `-e HOME` | `/home/ubuntu`; the host path |
 
 Not verified: podman versions other than 6.1.3, hosts without SELinux, and arm64 (the
-binary is built for it, never run).
+binary is built for it, never run). Nor, yet, anything about `--kvm`, `--pids-limit` and
+`--shm-size` beyond the arguments securebox gives podman (section 11, point 15).
 
 ## Appendix B: stage 0 results
 
@@ -1102,3 +1170,6 @@ create); `list` shows a container whose image carries the label.
   `lib/std/Diagnostics/Process.zs`, `examples/logstat`.
 - distrobox 1.8.2.5: the installed `distrobox-create` script.
 - podman 6.1.3: `podman run --help`, `podman exec --help`, and the probes above.
+- container-selinux 2.251.0: `container.te`, for what a confined container may do with
+  `/dev/kvm` (<https://github.com/containers/container-selinux>); podman's `--device`
+  documentation, for how a rootless container gets a device.
